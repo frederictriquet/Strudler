@@ -1,0 +1,27 @@
+{
+  "extends": "@tsconfig/svelte/tsconfig.json",
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "allowJs": false,
+    "checkJs": false,
+    "isolatedModules": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "baseUrl": ".",
+    "paths": {
+      "@core/*": ["src/core/*"],
+      "@stores/*": ["src/stores/*"],
+      "@lib/*": ["src/lib/*"]
+    },
+    "types": ["svelte", "vite/client", "webmidi"],
+    "lib": ["ESNext", "DOM", "DOM.Iterable", "WebWorker"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.svelte", "src/vite-env.d.ts", "library/**/*.ts"],
+  "exclude": ["node_modules", "dist", "study"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

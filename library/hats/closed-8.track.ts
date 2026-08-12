@@ -1,0 +1,11 @@
+import type { TrackDefinition } from '@core/library/types';
+
+// Straight eighth-note closed hats.
+const track: TrackDefinition = {
+  name: 'Closed 8',
+  beats: 4,
+  pattern: 's("hh*8").gain(0.5)',
+  tags: ['house', 'hats', 'closed'],
+};
+
+export default track;

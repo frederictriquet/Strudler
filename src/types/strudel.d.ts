@@ -50,6 +50,13 @@ declare module '@strudel/webaudio' {
   ): Promise<void>;
 }
 
+declare module '@strudel/tonal' {
+  // Registered as pattern methods (chord, voicing, anchor, rootNotes, scale…) and
+  // only ever used from evaluated pattern code, so the module is opaque here: we
+  // just hand it to evalScope. [SPEC-17.48]
+  export const scale: unknown;
+}
+
 declare module '@strudel/transpiler' {
   export function transpiler(code: string, options?: unknown): unknown;
 }

@@ -12,9 +12,6 @@
   } from '@stores/clockStore';
   import {
     rackError,
-    startTransport,
-    stopTransport,
-    transportRunning,
     dispatch,
     launcherState,
     channelsState,
@@ -31,10 +28,17 @@
     scenes,
     sceneStoreMode,
     activeScene,
+    dropActive,
+    filterHold,
+    gateActive,
+    phaserActive,
+    echoActive,
   } from '@stores/rackStore';
   import { openSettings } from '@stores/uiStore';
   import { MIN_BPM, MAX_BPM } from '@core/clock/Clock';
   import { NUDGE_BEATS } from '@core/mapping/mapping';
+  import { ECHO_BEATS } from '@core/engine/StrudelEngine';
+  import TransportTimer from '@lib/TransportTimer.svelte';
   import { CAMELOT_WHEEL, shortNote, shortNoteFr } from '@core/music/camelot';
 
   // Slider covers the usual range; the number input allows the full clock range.
@@ -46,13 +50,17 @@
   const launch = launcherState;
   const channels = channelsState;
   const advanced = advancedMode;
-  const running = transportRunning;
   const key = musicalKey;
   const force = forceKey;
   const phase0 = phaseOffsetBeats;
   const sceneList = scenes;
   const storeMode = sceneStoreMode;
   const active = activeScene;
+  const drop = dropActive;
+  const filter = filterHold;
+  const gate = gateActive;
+  const phaser = phaserActive;
+  const echo = echoActive;
 
   // Global quantize view derived from per-channel state. [SPEC-17.17]
   $: anyQuantized = $channels.some((c) => c.quantized);
@@ -68,14 +76,6 @@
     startClockTicker();
   });
   onDestroy(() => stopClockTicker());
-
-  async function onPlay() {
-    try {
-      await startTransport();
-    } catch {
-      // Error surfaced via rackError below. [SPEC-14.3]
-    }
-  }
 
   function onBpmInput(e: Event) {
     const value = Number((e.currentTarget as HTMLInputElement).value);
@@ -124,13 +124,8 @@
 <section class="panel">
   <!-- Transport + launch controls on one line. [SPEC-7.5/7.6, SPEC-8] -->
   <div class="row">
-    {#if $running}
-      <button class="stop" onclick={stopTransport} title="Bouton STOP du Korg">■ Stop</button>
-    {:else}
-      <button class="play" onclick={onPlay} title="Bouton PLAY du Korg — lance la lecture">
-        ▶ Play
-      </button>
-    {/if}
+    <!-- The timer IS the PLAY/STOP button. [SPEC-17.49] -->
+    <TransportTimer />
 
     <button
       class="mode"
@@ -204,13 +199,96 @@
       </button>
     </div>
 
+    <!-- Momentary DROP: cuts everything but the kick while held. Release is also
+         wired to pointerleave/cancel so the gesture can never stay stuck. [SPEC-17.40] -->
+    <button
+      class="drop"
+      class:on={$drop}
+      onpointerdown={() => dispatch({ type: 'dropHold', on: true })}
+      onpointerup={() => dispatch({ type: 'dropHold', on: false })}
+      onpointerleave={() => $drop && dispatch({ type: 'dropHold', on: false })}
+      onpointercancel={() => dispatch({ type: 'dropHold', on: false })}
+      title="DROP — maintenir pour couper tout sauf le kick"
+    >
+      DROP
+    </button>
+    <button
+      class="filt"
+      class:on={$filter === 'lp'}
+      onpointerdown={() => dispatch({ type: 'filterHold', mode: 'lp', on: true })}
+      onpointerup={() => dispatch({ type: 'filterHold', mode: 'lp', on: false })}
+      onpointerleave={() => $filter === 'lp' && dispatch({ type: 'filterHold', mode: 'lp', on: false })}
+      onpointercancel={() => dispatch({ type: 'filterHold', mode: 'lp', on: false })}
+      title="Passe-bas — maintenir (coupe l'aigu, garde kick et basse)"
+    >
+      LP
+    </button>
+    <button
+      class="filt"
+      class:on={$filter === 'hp'}
+      onpointerdown={() => dispatch({ type: 'filterHold', mode: 'hp', on: true })}
+      onpointerup={() => dispatch({ type: 'filterHold', mode: 'hp', on: false })}
+      onpointerleave={() => $filter === 'hp' && dispatch({ type: 'filterHold', mode: 'hp', on: false })}
+      onpointercancel={() => dispatch({ type: 'filterHold', mode: 'hp', on: false })}
+      title="Passe-haut — maintenir (coupe les graves)"
+    >
+      HP
+    </button>
+    <button
+      class="rise"
+      class:on={$filter === 'riser'}
+      onpointerdown={() => dispatch({ type: 'filterHold', mode: 'riser', on: true })}
+      onpointerup={() => dispatch({ type: 'filterHold', mode: 'riser', on: false })}
+      onpointerleave={() =>
+        $filter === 'riser' && dispatch({ type: 'filterHold', mode: 'riser', on: false })}
+      onpointercancel={() => dispatch({ type: 'filterHold', mode: 'riser', on: false })}
+      title="Riser — maintenir : montée de filtre sur 8 beats, relâcher pour retomber"
+    >
+      RISE
+    </button>
+    <button
+      class="gate"
+      class:on={$gate}
+      onpointerdown={() => dispatch({ type: 'gateHold', on: true })}
+      onpointerup={() => dispatch({ type: 'gateHold', on: false })}
+      onpointerleave={() => $gate && dispatch({ type: 'gateHold', on: false })}
+      onpointercancel={() => dispatch({ type: 'gateHold', on: false })}
+      title="Gate — maintenir : hache le son en croches, calé sur le tempo"
+    >
+      GATE
+    </button>
+    <button
+      class="phsr"
+      class:on={$phaser}
+      onpointerdown={() => dispatch({ type: 'phaserHold', on: true })}
+      onpointerup={() => dispatch({ type: 'phaserHold', on: false })}
+      onpointerleave={() => $phaser && dispatch({ type: 'phaserHold', on: false })}
+      onpointercancel={() => dispatch({ type: 'phaserHold', on: false })}
+      title="Phaser — maintenir : balayage lent (16 beats), calé sur le tempo"
+    >
+      PHASER
+    </button>
+    {#each ECHO_BEATS as beats (beats)}
+      <button
+        class="echo"
+        class:on={$echo[beats]}
+        onpointerdown={() => dispatch({ type: 'echoHold', beats, on: true })}
+        onpointerup={() => dispatch({ type: 'echoHold', beats, on: false })}
+        onpointerleave={() => $echo[beats] && dispatch({ type: 'echoHold', beats, on: false })}
+        onpointercancel={() => dispatch({ type: 'echoHold', beats, on: false })}
+        title={`Écho ${beats} beats — maintenir pour alimenter, la queue s'estompe au relâchement`}
+      >
+        ECHO {beats}
+      </button>
+    {/each}
+
     <!-- Scenes, mirroring the Stream Deck's first row: M+ then 4 slots. [SPEC-17.36] -->
     <div class="scenes">
       <button
         class="mplus"
         class:armed={$storeMode}
         onclick={() => dispatch({ type: 'sceneModeToggle' })}
-        title="M+ : le prochain appui sur une scène mémorise l'état armé (rappuyer pour annuler)"
+        title="M+ : le prochain appui sur une scène mémorise l'état armé et la quantisation des canaux (rappuyer pour annuler)"
       >
         M+
       </button>
@@ -226,7 +304,7 @@
               ? `Écraser la scène ${i + 1}`
               : `Mémoriser dans la scène ${i + 1}`
             : scene !== null
-              ? `Rappeler la scène ${i + 1} (${scene.length} loop(s))`
+              ? `Rappeler la scène ${i + 1} (${scene.armed.length} loop(s) + quantisation des canaux)`
               : `Scène ${i + 1} vide`}
         >
           {i + 1}
@@ -338,16 +416,6 @@
     align-items: center;
     gap: 0.75rem;
     flex-wrap: wrap;
-  }
-  .play {
-    border-color: var(--accent-dim);
-    color: var(--accent);
-    font-weight: 600;
-  }
-  .stop {
-    border-color: var(--danger);
-    color: var(--danger);
-    font-weight: 600;
   }
   .tempo {
     display: flex;
@@ -552,6 +620,78 @@
   .forcekey.on {
     color: var(--accent);
     border-color: var(--accent-dim);
+  }
+  .drop {
+    font-size: 0.78rem;
+    font-family: ui-monospace, monospace;
+    font-weight: 700;
+    padding: 0.3rem 0.6rem;
+    color: var(--danger);
+    border-color: rgba(248, 113, 113, 0.45);
+  }
+  .drop.on {
+    background: rgba(248, 113, 113, 0.25);
+    border-color: var(--danger);
+  }
+  .filt {
+    font-size: 0.78rem;
+    font-family: ui-monospace, monospace;
+    font-weight: 700;
+    padding: 0.3rem 0.55rem;
+    color: #6ab6ff;
+    border-color: rgba(106, 182, 255, 0.4);
+  }
+  .filt.on {
+    background: rgba(106, 182, 255, 0.25);
+    border-color: #6ab6ff;
+  }
+  .rise {
+    font-size: 0.78rem;
+    font-family: ui-monospace, monospace;
+    font-weight: 700;
+    padding: 0.3rem 0.55rem;
+    color: #c07bff;
+    border-color: rgba(192, 123, 255, 0.4);
+  }
+  .rise.on {
+    background: rgba(192, 123, 255, 0.25);
+    border-color: #c07bff;
+  }
+  .gate {
+    font-size: 0.78rem;
+    font-family: ui-monospace, monospace;
+    font-weight: 700;
+    padding: 0.3rem 0.55rem;
+    color: #46d6b4;
+    border-color: rgba(70, 214, 180, 0.4);
+  }
+  .gate.on {
+    background: rgba(70, 214, 180, 0.25);
+    border-color: #46d6b4;
+  }
+  .phsr {
+    font-size: 0.78rem;
+    font-family: ui-monospace, monospace;
+    font-weight: 700;
+    padding: 0.3rem 0.55rem;
+    color: #ffaf2d;
+    border-color: rgba(255, 175, 45, 0.4);
+  }
+  .phsr.on {
+    background: rgba(255, 175, 45, 0.25);
+    border-color: #ffaf2d;
+  }
+  .echo {
+    font-size: 0.78rem;
+    font-family: ui-monospace, monospace;
+    font-weight: 700;
+    padding: 0.3rem 0.5rem;
+    color: #8f9bff;
+    border-color: rgba(143, 155, 255, 0.4);
+  }
+  .echo.on {
+    background: rgba(143, 155, 255, 0.25);
+    border-color: #8f9bff;
   }
   /* Scene row, same semantics as the Stream Deck keys. [SPEC-17.36] */
   .scenes {

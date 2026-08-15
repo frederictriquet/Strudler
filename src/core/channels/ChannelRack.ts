@@ -17,6 +17,7 @@ import {
   stepFx,
   coerceEffects,
   coerceFxFocus,
+  isMissingTrack,
   FX_HEAVY,
   type ChannelState,
   type SlotState,
@@ -320,6 +321,14 @@ export class ChannelRack {
     const ch = this.channels[channelId];
     const slot = ch?.slots[slotIndex];
     if (!slot || !slot.trackId) return; // empty slot: nothing to trigger
+    // Binding kept but unresolved: say so instead of arming a silent slot.
+    // A live-coded override still has something to play. [SPEC-17.51, SPEC-9.2]
+    if (isMissingTrack(slot) && slot.codeOverride === null) {
+      this.emitError(
+        new Error(`Piste introuvable dans la bibliothèque : « ${slot.trackId} » (fichier supprimé ou renommé)`),
+      );
+      return;
+    }
     slot.playing = !slot.playing;
     this.emit();
 
@@ -342,6 +351,8 @@ export class ChannelRack {
     for (const ch of this.channels) {
       for (let s = 0; s < ch.slots.length; s++) {
         const slot = ch.slots[s];
+        // Skip unresolved bindings: there is no code to evaluate. [SPEC-17.51]
+        if (isMissingTrack(slot) && slot.codeOverride === null) continue;
         if (slot.playing && slot.trackId) {
           try {
             await engine.setVoice(ch.id, s, this.voiceCode(ch.id, s));
@@ -417,6 +428,13 @@ export class ChannelRack {
     }
     this.emit();
     if (engine.isStarted) await this.rebuildActiveVoices();
+  }
+
+  /** Per-channel quantization, captured with a scene. Unlike volumes and effects,
+   *  it is a discrete mode and not a knob position, so restoring it yanks nothing
+   *  — and a scene must launch the way it was memorized. [SPEC-17.52] */
+  quantizedSnapshot(): boolean[] {
+    return this.channels.map((ch) => ch.quantized);
   }
 
   /** The set of currently armed slots, as `channel:slot` keys — a scene. Only the

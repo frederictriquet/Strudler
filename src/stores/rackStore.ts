@@ -3,13 +3,20 @@
 // intent and rack state → LED output ([SPEC-6.2/6.4]).
 
 import { writable, get } from 'svelte/store';
-import { engine } from '@core/engine/StrudelEngine';
+import {
+  engine,
+  DJF_NEUTRAL,
+  DJF_LOWPASS,
+  DJF_HIGHPASS,
+  DJF_RISER_TOP,
+} from '@core/engine/StrudelEngine';
 import { clock, setBpm } from '@stores/clockStore';
 import { createDefaultRack, DEFAULT_CHANNEL_COUNT } from '@core/channels/ChannelRack';
 import { library } from '@core/library/Library';
 import {
   coerceEffects,
   coerceFxFocus,
+  isMissingTrack,
   FX_KINDS,
   type ChannelState,
 } from '@core/channels/types';
@@ -74,8 +81,9 @@ interface Settings {
   showSlotProgress: boolean;
   musicalKey: string | null;
   forceKey?: boolean;
-  /** Stored scenes: armed-slot keys per slot, null when empty. [SPEC-17.36] */
-  scenes?: (string[] | null)[];
+  /** Stored scenes, null when empty. A bare `string[]` is the legacy pre-[SPEC-17.52]
+   *  shape (armed slots only) and is migrated on load. [SPEC-17.36] */
+  scenes?: (Scene | string[] | null)[];
 }
 
 /** Show an animated progress gauge on playing slot buttons. Optional, persisted;
@@ -84,8 +92,33 @@ export const showSlotProgress = writable<boolean>(true);
 
 /** Scene slots on the Stream Deck's first row (M+ then 4 slots). [SPEC-17.36] */
 export const SCENE_COUNT = 4;
-/** Stored scenes: armed-slot keys, `null` = empty slot. Persisted. */
-export const scenes = writable<(string[] | null)[]>(Array(SCENE_COUNT).fill(null));
+
+/** A memorized scene. [SPEC-17.36, SPEC-17.52] */
+export interface Scene {
+  /** Armed slots, as `channel:slot` keys. */
+  armed: string[];
+  /** Per-channel quantization at capture time; empty = legacy scene, left as is. */
+  quantized: boolean[];
+}
+
+/** Stored scenes, `null` = empty slot. Persisted. */
+export const scenes = writable<(Scene | null)[]>(Array(SCENE_COUNT).fill(null));
+
+/** Normalize a persisted entry, migrating the legacy armed-only array. [SPEC-17.52] */
+function coerceScene(raw: unknown): Scene | null {
+  if (Array.isArray(raw)) {
+    // Legacy shape: armed keys only, no quantization captured.
+    return raw.every((k) => typeof k === 'string') ? { armed: raw as string[], quantized: [] } : null;
+  }
+  if (!raw || typeof raw !== 'object') return null;
+  const s = raw as Partial<Scene>;
+  if (!Array.isArray(s.armed) || !s.armed.every((k) => typeof k === 'string')) return null;
+  const quantized =
+    Array.isArray(s.quantized) && s.quantized.every((q) => typeof q === 'boolean')
+      ? (s.quantized as boolean[])
+      : [];
+  return { armed: s.armed as string[], quantized };
+}
 /** True while the next scene press stores instead of recalling. */
 export const sceneStoreMode = writable<boolean>(false);
 /** Last recalled scene, cleared as soon as the armed set is changed by hand. */
@@ -114,28 +147,39 @@ forceKey.subscribe(applyKeyToEngine);
 // wiring reactivity, so the app reopens in its previous state. [SPEC-13.2]
 const savedRack = loadJson<ChannelState[] | null>('rack', null);
 if (Array.isArray(savedRack)) {
-  const knownCategories = new Set(library.categories);
+  // Bindings are NEVER dropped, only re-resolved. [SPEC-17.51] Purging ids the
+  // library cannot resolve is destructive: the purged rack is persisted 400 ms
+  // later, so one unreadable library (renamed file, broken glob) permanently
+  // erases the session. Unresolved ids are kept, reported, and the slot is shown
+  // as missing until its file comes back.
+  const missing = new Set<string>();
   const coerced = savedRack.map((ch) => ({
     ...ch,
-    // Drop categories that no longer exist in the library. [SPEC-5.5]
-    categories: ch.categories.filter((c) => knownCategories.has(c)),
+    categories: [...ch.categories], // kept even if unknown: the folder may return
     quantized: typeof ch.quantized === 'boolean' ? ch.quantized : false, // [SPEC-17.17]
     effects: coerceEffects(ch.effects), // fills in effects added since [SPEC-17.23/17.28]
     fxFocus: coerceFxFocus(ch.fxFocus),
     slots: ch.slots.map((s) => {
-      // Drop bindings to tracks that no longer exist in the library.
       const track = s.trackId ? library.getTrack(s.trackId) : undefined;
+      if (s.trackId && !track) missing.add(s.trackId);
       return {
         ...s,
         playing: false,
         pending: false,
-        trackId: track ? s.trackId : null,
+        trackId: s.trackId,
         trackName: track ? track.name : null,
         trackBeats: track ? track.beats : null,
       };
     }),
   }));
   void rack.restore(coerced);
+  if (missing.size > 0) {
+    // Loud: the pads look wrong and the user must know why. [SPEC-14.3]
+    notify(
+      'error',
+      `${missing.size} piste(s) introuvable(s) dans la bibliothèque, les pads correspondants sont inactifs : ${[...missing].join(', ')}`,
+    );
+  }
 }
 const savedSettings = loadJson<Settings | null>('settings', null);
 if (savedSettings) {
@@ -156,12 +200,9 @@ if (savedSettings) {
     forceKey.set(savedSettings.forceKey);
   }
   if (Array.isArray(savedSettings.scenes)) {
-    // Keep exactly SCENE_COUNT entries, and only string arrays. [SPEC-17.36]
+    // Keep exactly SCENE_COUNT entries, migrating legacy shapes. [SPEC-17.36/17.52]
     scenes.set(
-      Array.from({ length: SCENE_COUNT }, (_, i) => {
-        const s = savedSettings.scenes?.[i];
-        return Array.isArray(s) && s.every((k) => typeof k === 'string') ? s : null;
-      }),
+      Array.from({ length: SCENE_COUNT }, (_, i) => coerceScene(savedSettings.scenes?.[i])),
     );
   }
 }
@@ -220,8 +261,11 @@ function syncLeds(channels: ChannelState[]): void {
       rack.slotsPerChannel,
     )) {
       const s = channels[channel]?.slots[slot];
+      // An unresolved binding is not playable → dark pad, like an empty slot.
+      // [SPEC-17.51]
+      const unresolved = s ? isMissingTrack(s) && s.codeOverride === null : false;
       const visual = slotVisual({
-        trackId: s?.trackId ?? null,
+        trackId: unresolved ? null : (s?.trackId ?? null),
         playing: s?.playing ?? false,
         pending: s?.pending ?? false,
       });
@@ -336,6 +380,112 @@ function applyPhaseOffset(beats: number): void {
   if (engine.isStarted) void rack.rebuildActiveVoices(); // voices carry `.late()`
 }
 
+// --- Momentary drop [SPEC-17.40] ---
+//
+// Held gesture: everything but the kick is cut while the key is down, and comes
+// straight back on release. The kick is found by CATEGORY, not by channel number,
+// so the gesture keeps working however the rack is arranged. If no channel is
+// tagged `kick`, the drop is a full silence — which is a usable effect too.
+
+const DROP_KEEP_CATEGORY = 'kick';
+
+export const dropActive = writable<boolean>(false);
+
+export function setDrop(on: boolean): void {
+  const channels = on
+    ? lastChannels.filter((ch) => !ch.categories.includes(DROP_KEEP_CATEGORY)).map((ch) => ch.id)
+    : [];
+  engine.setDropped(channels);
+  dropActive.set(on);
+}
+
+// --- Held filter gestures [SPEC-17.41] ---
+//
+// Global low-pass / high-pass, applied while a key is held. Both can be down at
+// once: low-pass wins, and releasing it falls back to high-pass if that one is
+// still held — so no gesture is ever left half-applied.
+
+export type FilterHold = 'lp' | 'hp' | 'riser';
+export const filterHold = writable<FilterHold | null>(null);
+
+// Glide times [SPEC-17.43]: engaging a filter sweeps in, but RELEASING must snap
+// back — a held gesture is released on a beat, so its end has to be sharp. Kept
+// just long enough (20 ms) to avoid a click.
+const FILTER_ATTACK_S = 0.2;
+const FILTER_RELEASE_S = 0.02;
+
+const heldFilters = new Set<FilterHold>();
+
+export function setFilterHold(mode: FilterHold, on: boolean): void {
+  if (on) heldFilters.add(mode);
+  else heldFilters.delete(mode);
+
+  // The riser is directional: while held it outranks the fixed filters. [SPEC-17.42]
+  const active: FilterHold | null = heldFilters.has('riser')
+    ? 'riser'
+    : heldFilters.has('lp')
+      ? 'lp'
+      : heldFilters.has('hp')
+        ? 'hp'
+        : null;
+  const previous = get(filterHold);
+  filterHold.set(active);
+  if (active === previous) return; // nothing to glide towards
+
+  if (active === 'riser') {
+    rampFilter(DJF_RISER_TOP, engine.riserSeconds()); // long climb
+  } else if (active === 'lp') {
+    rampFilter(DJF_LOWPASS, FILTER_ATTACK_S);
+  } else if (active === 'hp') {
+    rampFilter(DJF_HIGHPASS, FILTER_ATTACK_S);
+  } else {
+    rampFilter(DJF_NEUTRAL, FILTER_RELEASE_S);
+  }
+}
+
+// Filter glide, driven frame by frame by the app rather than by a Web Audio
+// automation: every sound event rewrites the orbit filter parameter, so an
+// automation would be overwritten at the next note and the sweep would jump.
+// [SPEC-17.43]
+let filterFrame: number | null = null;
+
+function rampFilter(target: number, seconds: number): void {
+  if (filterFrame !== null) cancelAnimationFrame(filterFrame);
+  const from = engine.globalFilter; // glide from wherever we are, never from a jump
+  const startedAt = performance.now();
+  const durationMs = Math.max(1, seconds * 1000);
+  const step = () => {
+    const t = Math.min(1, (performance.now() - startedAt) / durationMs);
+    engine.setGlobalFilter(from + (target - from) * t);
+    filterFrame = t < 1 ? requestAnimationFrame(step) : null;
+  };
+  step();
+}
+
+/** Held rhythmic gate: chops every channel on the beat grid. [SPEC-17.44] */
+export const gateActive = writable<boolean>(false);
+
+export function setGateHold(on: boolean): void {
+  engine.setGate(on);
+  gateActive.set(on);
+}
+
+/** Held global phaser, using superdough's own phaser. [SPEC-17.46] */
+export const phaserActive = writable<boolean>(false);
+
+export function setPhaserHold(on: boolean): void {
+  engine.setGlobalPhaser(on);
+  phaserActive.set(on);
+}
+
+/** Held echo sends, keyed by musical length in beats. [SPEC-17.47] */
+export const echoActive = writable<Record<number, boolean>>({});
+
+export function setEchoHold(beats: number, on: boolean): void {
+  engine.setEcho(beats, on);
+  echoActive.update((map) => ({ ...map, [beats]: on }));
+}
+
 // --- Scenes / snapshots (Stream Deck row 1: M+ then 4 slots) [SPEC-17.36] ---
 //
 // A scene is the set of armed slots. Storing is deliberately behind a mode ("M+")
@@ -365,7 +515,7 @@ export function pressScene(index: number): void {
 function storeScene(index: number): void {
   scenes.update((list) => {
     const next = [...list];
-    next[index] = rack.armedSnapshot();
+    next[index] = { armed: rack.armedSnapshot(), quantized: rack.quantizedSnapshot() };
     return next;
   });
   activeScene.set(index);
@@ -381,7 +531,15 @@ function recallScene(index: number): void {
   }
   recalling = true;
   try {
-    for (const { channel, slot } of rack.diffToScene(scene)) {
+    // Quantization FIRST: the slot toggles that follow must be launched the way
+    // the scene was memorized. Only channels that differ are toggled, so LEDs and
+    // persistence see a single change each. [SPEC-17.52]
+    scene.quantized.forEach((wanted, channel) => {
+      if (rack.isChannelQuantized(channel) !== wanted) {
+        dispatch({ type: 'channelModeToggle', channel });
+      }
+    });
+    for (const { channel, slot } of rack.diffToScene(scene.armed)) {
       dispatch({ type: 'slotToggle', channel, slot });
     }
   } finally {
@@ -459,6 +617,21 @@ export function dispatch(intent: Intent): void {
     case 'gridNudge':
       nudgeGrid(intent.beats);
       break;
+    case 'dropHold':
+      setDrop(intent.on);
+      break;
+    case 'filterHold':
+      setFilterHold(intent.mode, intent.on);
+      break;
+    case 'gateHold':
+      setGateHold(intent.on);
+      break;
+    case 'phaserHold':
+      setPhaserHold(intent.on);
+      break;
+    case 'echoHold':
+      setEchoHold(intent.beats, intent.on);
+      break;
     case 'sceneModeToggle':
       toggleSceneStoreMode();
       break;
@@ -469,10 +642,14 @@ export function dispatch(intent: Intent): void {
       // The AudioContext can only be unlocked by a real gesture (click/key), not
       // by MIDI. On the very first start, guide the user to click once. [SPEC-17.25]
       if (!engine.isAudioRunning) {
+        // Nothing can sound yet, and resume() from here would just stall: ask for
+        // the click instead of starting a transport that would be silent.
+        audioUnlockNeeded.set(true); // re-open the unlock modal [SPEC-17.50]
         notify(
           'warn',
-          'Audio verrouillé : clique une fois sur ▶ Play (ou dans la fenêtre) pour activer l’audio — ensuite le PLAY du Korg fonctionne (règle du navigateur).',
+          'Audio verrouillé : clique une fois sur « Activer l’audio » dans la fenêtre affichée — ensuite le PLAY du Korg fonctionne (règle du navigateur).',
         );
+        break;
       }
       void startTransport(); // nano PLAY = GUI PLAY
       break;
@@ -490,9 +667,69 @@ export function dispatch(intent: Intent): void {
 
 export const transportRunning = writable<boolean>(false);
 
+// --- Audio unlock [SPEC-17.50] ---
+//
+// The browser only unlocks the AudioContext on a real gesture (click/key); MIDI
+// does not count [SPEC-17.25]. A blocking modal asks for that one click at
+// startup, so PLAY (GUI, Korg or Stream Deck) then works right away.
+
+/** True while the AudioContext is still locked → the unlock modal is shown. */
+export const audioUnlockNeeded = writable<boolean>(false);
+
+/** Check the lock state at startup (before any user gesture). */
+export function checkAudioUnlock(): void {
+  audioUnlockNeeded.set(!engine.isAudioRunning);
+}
+
+/** Unlock audio from the modal's button — that click IS the required gesture.
+ *  Does not start playback: PLAY stays an explicit action. [SPEC-17.9] */
+export async function unlockAudio(): Promise<void> {
+  try {
+    // engine.unlock() resumes the context itself: superdough never does it
+    // (broken guard in initAudio, see StrudelEngine.unlock).
+    const running = await engine.unlock();
+    if (!running)
+      throw new Error(
+        `l'AudioContext est resté « ${engine.audioState} » (onglet en arrière-plan ou son coupé par le navigateur ?)`,
+      );
+    audioUnlockNeeded.set(false);
+    rackError.set(null);
+  } catch (err) {
+    // Never silent: the modal stays open and shows the reason. [SPEC-14.3]
+    const message = `Activation audio impossible : ${(err as Error).message}`;
+    rackError.set(message);
+    notify('error', message);
+  }
+}
+
+// Performance timer [SPEC-17.38]: wall-clock time since the last PLAY. Reset on
+// every start (not resumed), frozen on stop so the last duration stays readable.
+// `startedAt` null = not running; `frozenMs` holds the value while stopped.
+export const transportStartedAt = writable<number | null>(null);
+export const transportFrozenMs = writable<number>(0);
+
+function timerStart(): void {
+  transportFrozenMs.set(0);
+  transportStartedAt.set(performance.now());
+}
+
+function timerFreeze(): void {
+  const started = get(transportStartedAt);
+  if (started !== null) transportFrozenMs.set(performance.now() - started);
+  transportStartedAt.set(null);
+}
+
 export async function startTransport(): Promise<void> {
   try {
-    await engine.init(); // needs a user gesture; GUI PLAY provides it
+    // The GUI PLAY is a gesture, so resume from here too: a context suspended
+    // again (tab backgrounded, device change) would otherwise play silence.
+    // MIDI PLAY is not a gesture — resume then fails and the modal takes over.
+    if (!(await engine.unlock())) {
+      audioUnlockNeeded.set(true); // ask for the required click [SPEC-17.50]
+      throw new Error(
+        `audio verrouillé (AudioContext « ${engine.audioState} ») — clique sur « Activer l’audio »`,
+      );
+    }
     clock.applyTempo();
     // Ensure the sample bank is loaded (sound names registered) BEFORE playing,
     // otherwise the first cycle triggers "sound bd not found". [SPEC-12.1]
@@ -501,6 +738,7 @@ export async function startTransport(): Promise<void> {
     await engine.startTransport(); // run the scheduler → armed voices sound
     audioEnabled.set(true);
     transportRunning.set(true);
+    timerStart(); // every PLAY restarts the performance timer [SPEC-17.38]
     rackError.set(null);
   } catch (err) {
     rackError.set((err as Error).message);
@@ -510,12 +748,14 @@ export async function startTransport(): Promise<void> {
 export function stopTransport(): void {
   engine.stopTransport(); // pause scheduler, keep armed voices → resumable
   transportRunning.set(false);
+  timerFreeze();
 }
 
 /** Hard stop: silence + clear the whole armed set (used by session stop). */
 export function stopAll(): void {
   rack.stopAll();
   transportRunning.set(false);
+  timerFreeze();
 }
 
 // --- Association editing (live) [SPEC-5.2/5.3, SPEC-10.6] ---

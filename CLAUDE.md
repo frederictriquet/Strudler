@@ -50,7 +50,7 @@ vite-plugins/  soundsServer.ts — sert ~/Music/Sounds sous /sounds/ + génère 
 - `core/` n'importe jamais depuis `lib/` ou `stores/`.
 - GUI, MIDI et Stream Deck produisent le **même Intent** et passent par `dispatch()` (`src/stores/rackStore.ts`) — jamais d'appel direct au moteur depuis un composant.
 - **Aucune exception silencieuse** `[SPEC-14.3]` : toute erreur est remontée dans l'UI (toasts / `logStore`), pas seulement en console.
-- Transport **PLAY/STOP** `[SPEC-17.9]` : activer un slot **arme** la piste (silencieuse) ; le son ne part qu'au PLAY. Interagir ne déclenche jamais de son tout seul.
+- Transport **PLAY/STOP** `[SPEC-17.9]` : activer un slot **arme** la piste (silencieuse) ; le son ne part qu'au PLAY. Interagir ne déclenche jamais de son tout seul. Le **chronomètre est le bouton PLAY/STOP** `[SPEC-17.49]`, et l'audio est déverrouillé par une **modale au démarrage** `[SPEC-17.50]` (le navigateur exige un clic ; un message MIDI ne compte pas).
 - Volume et filtre sont modifiés à chaud via des `ref` Strudel (pas de ré-évaluation du pattern).
 - Ajouter une piste ou un son ne demande aucune modification du moteur ni de la GUI.
 

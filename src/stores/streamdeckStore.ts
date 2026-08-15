@@ -9,7 +9,17 @@ import {
   type StreamDeckStatus,
   type SceneView,
 } from '@core/streamdeck/StreamDeckService';
-import { dispatch, scenes, sceneStoreMode, activeScene } from '@stores/rackStore';
+import {
+  dispatch,
+  scenes,
+  sceneStoreMode,
+  activeScene,
+  dropActive,
+  filterHold,
+  gateActive,
+  phaserActive,
+  echoActive,
+} from '@stores/rackStore';
 import { notify } from '@stores/logStore';
 
 export const streamDeckSupported = StreamDeckService.isSupported();
@@ -18,11 +28,16 @@ export const streamDeckError = writable<string | null>(null);
 
 /** What the scene row must display. [SPEC-17.36] */
 const sceneView = derived(
-  [scenes, sceneStoreMode, activeScene],
-  ([list, storeMode, active]): SceneView => ({
+  [scenes, sceneStoreMode, activeScene, dropActive, filterHold, gateActive, phaserActive, echoActive],
+  ([list, storeMode, active, drop, filter, gate, phaser, echo]): SceneView => ({
     storeMode,
     filled: list.map((s) => s !== null),
     active,
+    dropActive: drop,
+    filterHold: filter,
+    gateActive: gate,
+    phaserActive: phaser,
+    echoActive: echo,
   }),
 );
 

@@ -7,9 +7,13 @@
 
 import * as strudelCore from '@strudel/core';
 import * as strudelMini from '@strudel/mini';
+// Chords & voicings: `chord(...).anchor(...).voicing()` keeps a progression in a
+// fixed register with automatic voice leading, instead of shifting a fixed set of
+// notes around. [SPEC-17.48]
+import * as strudelTonal from '@strudel/tonal';
 import * as strudelWebaudio from '@strudel/webaudio';
 import { transpiler } from '@strudel/transpiler';
-import type { TimeSource } from '@core/clock/Clock';
+import { DEFAULT_BEATS_PER_CYCLE, type TimeSource } from '@core/clock/Clock';
 import { defaultEffects, type ChannelEffects } from '@core/channels/types';
 import {
   snapTo,
@@ -27,12 +31,34 @@ const { repl, evalScope, ref } = strudelCore;
 const { getAudioContext, webaudioOutput, registerSynthSounds, initAudioOnFirstClick, samples } =
   strudelWebaudio;
 
+// Re-exported by @strudel/webaudio from superdough, which ships no types. Reached
+// defensively: if it ever goes away, the drop still works through the per-event
+// gain ref, it just no longer cuts sounds already ringing. [SPEC-17.40]
+type OrbitBuses = {
+  nodes?: Record<
+    number,
+    {
+      output?: { gain?: AudioParam };
+      djfNode?: { parameters?: { get(name: string): AudioParam | undefined } };
+    }
+  >;
+  /** Master chain: everything meets at destinationGain before the destination. */
+  output?: { destinationGain?: AudioNode };
+};
+const getSuperdoughAudioController = (
+  strudelWebaudio as unknown as { getSuperdoughAudioController?: () => OrbitBuses | undefined }
+).getSuperdoughAudioController;
+
 export type EngineStatus = 'idle' | 'starting' | 'ready' | 'playing' | 'error';
 
 type Repl = ReturnType<typeof repl>;
 
 export const DEFAULT_CHANNEL_GAIN = 0.8;
 export const NEUTRAL_FILTER = 0.5;
+
+/** Cap on waiting for AudioContext.resume(): outside a user gesture the promise
+ *  can stay pending forever, and the caller must still get an answer. [SPEC-17.50] */
+const RESUME_TIMEOUT_MS = 2000;
 
 // Bipolar filter mapping ([SPEC-7.2], Q1 = single bipolar knob). One value
 // f ∈ [0,1] per channel: 0.5 = neutral, f<0.5 sweeps a low-pass down (darker),
@@ -59,6 +85,35 @@ function hpfCutoff(f: number): number {
 // Delay time as a fraction of a cycle (1 cycle = 4 beats), tempo-synced via the
 // fxdtime ref: 0.125 cycle = one 1/8 note. [SPEC-17.24]
 const FX_DELAY_DIV = 0.125;
+// Global DJ filter (`djf`): 0.5 bypasses, below is low-pass, above high-pass.
+// The held gestures use fixed, musical positions. [SPEC-17.41]
+export const DJF_NEUTRAL = 0.5;
+export const DJF_LOWPASS = 0.2; // ≈ 375 Hz — keeps kick and bass, cuts the top
+export const DJF_HIGHPASS = 0.75; // ≈ 915 Hz — strips the low end, keeps the air
+export const DJF_RISER_TOP = 0.9; // ≈ 6 kHz — where a held riser climbs to
+/** Riser climb, in beats. Ramped linearly in `djf`, whose cutoff curve is a 4th
+ *  power — so the sweep is exponential in Hz, which is how the ear reads it. */
+export const RISER_BEATS = 8;
+/** Rhythmic gate: steps per beat (2 = eighth notes) and how much of a step is open. */
+export const GATE_STEPS_PER_BEAT = 2;
+const GATE_DUTY = 0.5;
+const GATE_LOOKAHEAD_S = 0.2; // schedule this far ahead, so timing is sample-accurate
+const GATE_EDGE_S = 0.004; // short fade on each edge, avoids clicks
+/** Beats over which the chop deepens: the gate fades in instead of slamming. */
+const GATE_FADE_IN_BEATS = 8;
+
+// Held global phaser [SPEC-17.46]: superdough already has one, so it is driven
+// through the same refs as the per-channel PHS effect rather than rebuilt in Web
+// Audio. Slow sweep (4 cycles = 16 beats), tempo-locked.
+const GLOBAL_PHASER_CYCLES = 4;
+const GLOBAL_PHASER_DEPTH = 1.2;
+
+// Tempo-locked echoes [SPEC-17.47]: a send per musical length, held on a key.
+export const ECHO_BEATS = [1, 2, 4] as const;
+const ECHO_FEEDBACK = 0.55; // each repeat ~5 dB down: a few audible echoes
+const ECHO_WET = 0.8;
+const ECHO_SEND_RAMP_S = 0.02;
+const ECHO_MAX_DELAY_S = 12; // room for 4 beats even at very slow tempos
 function fxLpfHz(p: number): number {
   return LPF_MIN * Math.pow(LPF_MAX / LPF_MIN, Math.min(1, Math.max(0, p)));
 }
@@ -127,7 +182,7 @@ export class StrudelEngine implements TimeSource {
     this.armed = initAudioOnFirstClick();
     // Register the pattern-eval scope eagerly (no audio graph needed for this).
     this.scopeReady = (async () => {
-      await evalScope(strudelCore, strudelMini, strudelWebaudio);
+      await evalScope(strudelCore, strudelMini, strudelWebaudio, strudelTonal);
       await registerSynthSounds();
       // Live per-channel control accessors available inside evaluated code.
       await evalScope({
@@ -145,6 +200,8 @@ export class StrudelEngine implements TimeSource {
         fxsize: (id: number) => ref(() => fxRoomSize(this.fxFor(id).reverb.p2)),
         // Tempo-synced delay time in seconds (global, updates with the tempo). [SPEC-17.24]
         fxdtime: () => ref(() => this.delayTimeSeconds()),
+        // Global DJ filter, shared by every channel. [SPEC-17.41]
+        gdjf: () => ref(() => this.globalDjf),
         // Phaser: always in the chain — depth 0 means superdough builds nothing,
         // so it costs nothing while off. [SPEC-17.32]
         fxphrate: (id: number) => ref(() => this.fxPhaserRateFor(id)),
@@ -161,6 +218,40 @@ export class StrudelEngine implements TimeSource {
           ref(() => fxDrivePost(this.fxFor(id).drive.p1, this.fxFor(id).drive.p2)),
       });
     })();
+  }
+
+  /**
+   * Resume the AudioContext, then init(). MUST be called from a user gesture,
+   * synchronously (no await before it) so the transient activation still holds.
+   *
+   * superdough's own initAudio() cannot be relied on: its guard reads
+   * `if ((!audioCtx) instanceof OfflineAudioContext) await audioCtx.resume()` —
+   * `(!audioCtx)` is a boolean, so the test is always false and resume() is never
+   * called (superdough 1.3.0). We resume ourselves. [SPEC-17.50]
+   *
+   * Returns true once the context is actually running.
+   */
+  async unlock(): Promise<boolean> {
+    const ctx = getAudioContext();
+    if (ctx.state !== 'running') {
+      // A resume() outside a gesture can stay pending forever — never block on it.
+      await Promise.race([
+        ctx.resume(),
+        new Promise((resolve) => setTimeout(resolve, RESUME_TIMEOUT_MS)),
+      ]);
+    }
+    if (!this.armed) this.arm();
+    await this.init();
+    return this.isAudioRunning;
+  }
+
+  /** AudioContext state, for diagnostics ('suspended' | 'running' | 'closed'). */
+  get audioState(): string {
+    try {
+      return getAudioContext().state;
+    } catch (err) {
+      return `indisponible (${(err as Error).message})`;
+    }
   }
 
   /**
@@ -219,13 +310,19 @@ export class StrudelEngine implements TimeSource {
     // Phase nudge first: it shifts the pattern in time, before any processing.
     const shifted =
       this.phaseOffsetCycles === 0 ? `(${code})` : `(${code}).late(${this.phaseOffsetCycles})`;
+    // One orbit per channel (1-based, matching the channel numbers shown in the
+    // GUI). superdough builds the delay and reverb buses PER ORBIT, so this both
+    // makes those effects truly per-channel and lets a pattern sidechain a precise
+    // channel with `.duck(n)`. Safe on a stereo output: orbits only map to separate
+    // output pairs when `multiChannelOrbits` is enabled, which it is not. [SPEC-17.37]
     let chain =
-      `${shifted}` +
+      `${shifted}.orbit(${channel + 1})` +
       `.lpf(fxcut(${channel})).lpq(fxq(${channel}))` +
       `.hpf(fxhcut(${channel})).hpq(fxhq(${channel}))` +
       `.delay(fxdmix(${channel})).delaytime(fxdtime()).delayfeedback(fxdfb(${channel}))` +
       `.room(fxroom(${channel})).roomsize(fxsize(${channel}))` +
-      `.phaserrate(fxphrate(${channel})).phaserdepth(fxphdepth(${channel}))`;
+      `.phaserrate(fxphrate(${channel})).phaserdepth(fxphdepth(${channel}))` +
+      `.djf(gdjf())`; // global filter gesture, bypassed at 0.5 [SPEC-17.41]
     if (fx.tremolo.on) {
       chain += `.tremolosync(fxtrsync(${channel})).tremolodepth(fxtrdepth(${channel}))`;
     }
@@ -402,6 +499,7 @@ export class StrudelEngine implements TimeSource {
   }
 
   private gainFor(channelId: number): number {
+    if (this.droppedChannels.has(channelId)) return 0; // held drop [SPEC-17.40]
     return this.channelGains.get(channelId) ?? DEFAULT_CHANNEL_GAIN;
   }
 
@@ -452,20 +550,255 @@ export class StrudelEngine implements TimeSource {
     return fx.delay.on ? fxDelayMix(fx.delay.p2) : 0;
   }
 
+  // --- Momentary drop (held gesture) [SPEC-17.40] ---
+  //
+  // Cutting through the per-event gain ref alone would only silence the NEXT
+  // note, leaving anything already ringing untouched. So the channel's orbit
+  // output is ramped down as well — that acts on the audio bus, hence on sounds
+  // in flight. The ref keeps new events silent while the drop is held.
+
+  private readonly droppedChannels = new Set<number>();
+
+  /** Silence these channels (empty = release the drop). Immediate. */
+  setDropped(channels: readonly number[]): void {
+    const next = new Set(channels);
+    const touched = new Set<number>([...next, ...this.droppedChannels]);
+    this.droppedChannels.clear();
+    for (const c of next) this.droppedChannels.add(c);
+    for (const channel of touched) this.applyOrbitGain(channel);
+  }
+
+  get isDropped(): boolean {
+    return this.droppedChannels.size > 0;
+  }
+
+  // --- Global filter sweep (held gesture) [SPEC-17.41] ---
+  //
+  // Uses superdough's `djf`, a DJ-style bipolar filter living ON THE ORBIT:
+  // 0.5 = bypass, below = low-pass, above = high-pass. Because the node sits on
+  // the bus, changing it affects sounds already ringing — unlike a per-event
+  // parameter. The value is both pushed straight onto existing nodes (immediate)
+  // and carried by the `gdjf` ref in the voice chain (so the node gets created,
+  // and new events keep the right setting).
+
+  private globalDjf = DJF_NEUTRAL;
+
+  /** Set the global filter: 0.5 = off, <0.5 low-pass, >0.5 high-pass. */
+  setGlobalFilter(value: number): void {
+    this.globalDjf = Math.min(1, Math.max(0, value));
+    if (!this.repl || !getSuperdoughAudioController) return;
+    const nodes = getSuperdoughAudioController()?.nodes;
+    if (!nodes) return;
+    const now = getAudioContext().currentTime;
+    for (const orbit of Object.values(nodes)) {
+      const param = orbit?.djfNode?.parameters?.get('value');
+      param?.setTargetAtTime(this.globalDjf, now, 0.01);
+    }
+  }
+
+  get globalFilter(): number {
+    return this.globalDjf;
+  }
+
+  /** Seconds a riser climb lasts at the current tempo. [SPEC-17.42] */
+  riserSeconds(): number {
+    return RISER_BEATS / (this.cps * DEFAULT_BEATS_PER_CYCLE);
+  }
+
+  /** Ramp a channel's orbit output to 0 (dropped) or 1. Short ramp avoids clicks. */
+  private applyOrbitGain(channel: number): void {
+    const param = this.orbitGainParam(channel);
+    if (!param) return; // that orbit has never produced sound — nothing to cut
+    const now = getAudioContext().currentTime;
+    param.cancelScheduledValues(now);
+    param.setTargetAtTime(this.droppedChannels.has(channel) ? 0 : 1, now, 0.005);
+  }
+
+  /** Output gain of a channel's orbit, or null if that orbit does not exist yet. */
+  private orbitGainParam(channel: number): AudioParam | null {
+    if (!this.repl || !getSuperdoughAudioController) return null; // audio not up
+    return getSuperdoughAudioController()?.nodes?.[channel + 1]?.output?.gain ?? null; // orbit = ch+1
+  }
+
+  // Single master insert point, created once: everything superdough produces goes
+  // through `masterHub`, and every send returns into `masterOut`. Each effect
+  // rewiring the master itself would be a good way to end up silent. [SPEC-17.47]
+  private masterHub: GainNode | null = null;
+  private masterOut: GainNode | null = null;
+
+  private ensureMasterInsert(): { hub: GainNode; out: GainNode } | null {
+    if (this.masterHub && this.masterOut) return { hub: this.masterHub, out: this.masterOut };
+    if (!this.repl || !getSuperdoughAudioController) return null;
+    const master = getSuperdoughAudioController()?.output?.destinationGain;
+    if (!master) return null;
+
+    const ctx = getAudioContext();
+    const hub = new GainNode(ctx);
+    const out = new GainNode(ctx);
+    master.disconnect();
+    master.connect(hub);
+    hub.connect(out); // dry path — sends are added in parallel
+    out.connect(ctx.destination);
+    this.masterHub = hub;
+    this.masterOut = out;
+    return { hub, out };
+  }
+
+  // --- Tempo-locked echo sends (held) [SPEC-17.47] ---
+  //
+  // One delay line per musical length. Holding opens the SEND, not the return:
+  // releasing stops feeding the line but lets its tail ring out and decay — which
+  // is the whole point of an echo, and why this gesture does not stop dead like
+  // the others.
+
+  private readonly echoes = new Map<number, { send: GainNode; delay: DelayNode }>();
+
+  private ensureEcho(beats: number): { send: GainNode; delay: DelayNode } | null {
+    const existing = this.echoes.get(beats);
+    if (existing) return existing;
+    const insert = this.ensureMasterInsert();
+    if (!insert) return null;
+
+    const ctx = getAudioContext();
+    const send = new GainNode(ctx, { gain: 0 });
+    const delay = new DelayNode(ctx, {
+      maxDelayTime: ECHO_MAX_DELAY_S,
+      delayTime: this.echoSeconds(beats),
+    });
+    const feedback = new GainNode(ctx, { gain: ECHO_FEEDBACK });
+    const wet = new GainNode(ctx, { gain: ECHO_WET });
+
+    insert.hub.connect(send).connect(delay);
+    delay.connect(feedback).connect(delay); // repeats, decaying
+    delay.connect(wet).connect(insert.out);
+
+    const echo = { send, delay };
+    this.echoes.set(beats, echo);
+    return echo;
+  }
+
+  private echoSeconds(beats: number): number {
+    return Math.min(ECHO_MAX_DELAY_S, beats / (this.cps * DEFAULT_BEATS_PER_CYCLE));
+  }
+
+  /** Hold an echo of `beats` length. Releasing lets the tail ring out. */
+  setEcho(beats: number, on: boolean): void {
+    const echo = this.ensureEcho(beats);
+    if (!echo) return;
+    const now = getAudioContext().currentTime;
+    if (on) echo.delay.delayTime.setValueAtTime(this.echoSeconds(beats), now); // follow tempo
+    echo.send.gain.cancelScheduledValues(now);
+    echo.send.gain.setValueAtTime(echo.send.gain.value, now);
+    echo.send.gain.linearRampToValueAtTime(on ? 1 : 0, now + ECHO_SEND_RAMP_S);
+  }
+
+
+
+  // --- Rhythmic gate (held) [SPEC-17.44] ---
+  //
+  // Chops every channel on a tempo-locked grid. Edges are SCHEDULED AHEAD on the
+  // audio clock rather than pushed frame by frame: a rAF loop would place them
+  // with up to ~8 ms of jitter, which is audible on a gate. Runs on the orbit
+  // output gain (the bus), so held sounds are chopped too — a per-event gain
+  // would only mute whole notes.
+
+  private gateActive = false;
+  private gateTimer: ReturnType<typeof setInterval> | null = null;
+  private gateNextBeat = 0; // next gate edge, in absolute beats
+  private gateStartBeat = 0; // when the gesture began, to fade the chop in
+
+  setGate(on: boolean): void {
+    if (on === this.gateActive) return;
+    this.gateActive = on;
+    if (this.gateTimer !== null) {
+      clearInterval(this.gateTimer);
+      this.gateTimer = null;
+    }
+    if (!on) {
+      // Back to full level, still honouring any held drop.
+      for (const channel of this.channelGains.keys()) this.applyOrbitGain(channel);
+      return;
+    }
+    if (!this.repl) return;
+    const step = 1 / GATE_STEPS_PER_BEAT;
+    this.gateStartBeat = this.currentBeat();
+    this.gateNextBeat = Math.ceil(this.gateStartBeat / step) * step; // snap to the grid
+    this.scheduleGate();
+    this.gateTimer = setInterval(() => this.scheduleGate(), 25);
+  }
+
+  get isGating(): boolean {
+    return this.gateActive;
+  }
+
+  private currentBeat(): number {
+    return this.now() * DEFAULT_BEATS_PER_CYCLE;
+  }
+
+  private beatsToSeconds(beats: number): number {
+    return beats / (this.cps * DEFAULT_BEATS_PER_CYCLE);
+  }
+
+  private scheduleGate(): void {
+    if (!this.gateActive || this.cps <= 0) return;
+    const ctx = getAudioContext();
+    const step = 1 / GATE_STEPS_PER_BEAT;
+    const nowBeat = this.currentBeat();
+    // Queue every edge falling inside the look-ahead window.
+    for (let guard = 0; guard < 64; guard++) {
+      const ahead = this.beatsToSeconds(this.gateNextBeat - nowBeat);
+      if (ahead > GATE_LOOKAHEAD_S) break;
+      const openAt = Math.max(ctx.currentTime, ctx.currentTime + ahead);
+      const closeAt = openAt + this.beatsToSeconds(step * GATE_DUTY);
+      // The chop deepens over the first beats, so holding the key eases the
+      // rhythm in instead of slamming to full silence. [SPEC-17.45]
+      const depth = Math.min(1, (this.gateNextBeat - this.gateStartBeat) / GATE_FADE_IN_BEATS);
+      const closedLevel = 1 - depth;
+      for (const channel of this.channelGains.keys()) {
+        if (this.droppedChannels.has(channel)) continue; // a held drop wins
+        const param = this.orbitGainParam(channel);
+        if (!param) continue;
+        param.setTargetAtTime(1, openAt, GATE_EDGE_S);
+        param.setTargetAtTime(closedLevel, closeAt, GATE_EDGE_S);
+      }
+      this.gateNextBeat += step;
+    }
+  }
+
   private fxRoomFor(channelId: number): number {
     const fx = this.fxFor(channelId);
     return fx.reverb.on ? fxRoomMix(fx.reverb.p1) : 0;
   }
 
+  // --- Held global phaser [SPEC-17.46] ---
+  //
+  // Rides the SAME control refs as the per-channel PHS effect: superdough takes a
+  // single phaser setting per event, so a second `.phaserrate()` in the chain
+  // would just overwrite the first. The gesture therefore wins over the channel's
+  // own phaser while held, and everything falls back afterwards.
+
+  private globalPhaserOn = false;
+
+  setGlobalPhaser(on: boolean): void {
+    this.globalPhaserOn = on;
+  }
+
+  get isPhasing(): boolean {
+    return this.globalPhaserOn;
+  }
+
   /** Phaser depth, or 0 when off — superdough then skips building it. [SPEC-17.32] */
   private fxPhaserDepthFor(channelId: number): number {
+    if (this.globalPhaserOn) return GLOBAL_PHASER_DEPTH;
     const fx = this.fxFor(channelId);
     return fx.phaser.on ? fxPhaserDepth(fx.phaser.p2) : 0;
   }
 
   /** Phaser LFO rate in Hz, from a sweep length in cycles → tempo-synced. [SPEC-17.33] */
   private fxPhaserRateFor(channelId: number): number {
-    const cycles = snapTo(PHASER_CYCLES, this.fxFor(channelId).phaser.p1);
+    const cycles = this.globalPhaserOn
+      ? GLOBAL_PHASER_CYCLES
+      : snapTo(PHASER_CYCLES, this.fxFor(channelId).phaser.p1);
     return this.cps / cycles;
   }
 

@@ -18,7 +18,8 @@ export function slotLabel(index: number, total: number): string {
 export interface SlotState {
   /** Track assigned to this button, or null if empty. [SPEC-5.4] */
   trackId: string | null;
-  /** Display name of the assigned track (denormalized for the GUI). */
+  /** Display name of the assigned track (denormalized for the GUI). null while
+   *  the id does not resolve in the library — see `isMissingTrack`. */
   trackName: string | null;
   /** Loop length in beats of the assigned track (denormalized for the progress
    *  gauge). null when empty. [SPEC-17.10] */
@@ -32,6 +33,18 @@ export interface SlotState {
    * the library file.
    */
   codeOverride: string | null;
+}
+
+/**
+ * A slot bound to a track id the library cannot resolve. [SPEC-17.51]
+ *
+ * The binding is DELIBERATELY kept: a library that is momentarily unreadable
+ * (renamed file, broken glob, load error) must never silently erase a session —
+ * restoring the file restores the pads. Such a slot is unplayable and shown as
+ * such, unless a live-coded override gives it something to play ([SPEC-9.2]).
+ */
+export function isMissingTrack(slot: SlotState): boolean {
+  return slot.trackId !== null && slot.trackName === null;
 }
 
 /**
@@ -77,16 +90,18 @@ export interface FxState {
 
 export type ChannelEffects = Record<FxKind, FxState>;
 
-/** Short label + the two parameter names (p1 = knob, p2 = fader) per effect. */
-export const FX_META: Record<FxKind, { label: string; p1: string; p2: string }> = {
-  lpf: { label: 'LP', p1: 'cutoff', p2: 'réson.' },
-  hpf: { label: 'HP', p1: 'cutoff', p2: 'réson.' },
-  delay: { label: 'DLY', p1: 'fdbk', p2: 'mix' },
-  reverb: { label: 'REV', p1: 'mix', p2: 'taille' },
-  phaser: { label: 'PHS', p1: 'vitesse', p2: 'profond' },
-  tremolo: { label: 'TRM', p1: 'division', p2: 'profond' },
-  lofi: { label: 'LOFI', p1: 'bits', p2: 'resamp' },
-  drive: { label: 'DRV', p1: 'drive', p2: 'shape' },
+/** Full name (GUI), short label (LEDs/compact surfaces) and the two parameter
+ *  names (p1 = knob, p2 = fader) per effect. The channel strip shows `name`:
+ *  abbreviations are unreadable at a glance on stage. [SPEC-17.53] */
+export const FX_META: Record<FxKind, { name: string; label: string; p1: string; p2: string }> = {
+  lpf: { name: 'Passe-bas', label: 'LP', p1: 'cutoff', p2: 'réson.' },
+  hpf: { name: 'Passe-haut', label: 'HP', p1: 'cutoff', p2: 'réson.' },
+  delay: { name: 'Delay', label: 'DLY', p1: 'fdbk', p2: 'mix' },
+  reverb: { name: 'Réverbe', label: 'REV', p1: 'mix', p2: 'taille' },
+  phaser: { name: 'Phaser', label: 'PHS', p1: 'vitesse', p2: 'profond' },
+  tremolo: { name: 'Trémolo', label: 'TRM', p1: 'division', p2: 'profond' },
+  lofi: { name: 'Lo-fi', label: 'LOFI', p1: 'bits', p2: 'resamp' },
+  drive: { name: 'Saturation', label: 'DRV', p1: 'drive', p2: 'shape' },
 };
 
 /** Neutral parameters for an effect: present but inaudible, so activating it does

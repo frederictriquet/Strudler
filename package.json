@@ -17,6 +17,7 @@
     "@elgato-stream-deck/webhid": "^7.6.3",
     "@strudel/core": "^1.1.0",
     "@strudel/mini": "^1.1.0",
+    "@strudel/tonal": "^1.2.6",
     "@strudel/transpiler": "^1.1.0",
     "@strudel/webaudio": "^1.1.0"
   },

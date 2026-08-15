@@ -7,9 +7,16 @@
   import LibraryPanel from '@lib/LibraryPanel.svelte';
   import CodePanel from '@lib/CodePanel.svelte';
   import SettingsModal from '@lib/SettingsModal.svelte';
+  import AudioUnlockModal from '@lib/AudioUnlockModal.svelte';
   import Toasts from '@lib/Toasts.svelte';
   import { armEngine } from '@stores/engineStore';
-  import { initMidiDispatch, advancedMode, persistError } from '@stores/rackStore';
+  import {
+    initMidiDispatch,
+    advancedMode,
+    persistError,
+    audioUnlockNeeded,
+    checkAudioUnlock,
+  } from '@stores/rackStore';
   import { settingsOpen } from '@stores/uiStore';
   import { notices, clearNotices, initLogCapture } from '@stores/logStore';
   import { loadDefaultSamples } from '@stores/samplesStore';
@@ -20,9 +27,11 @@
   const persist = persistError;
   const log = notices;
   const modalOpen = settingsOpen;
+  const unlockNeeded = audioUnlockNeeded;
 
   onMount(() => {
-    armEngine(); // arm audio unlock (resumed on the explicit ▶ Play click)
+    armEngine(); // arm audio unlock BEFORE any click (resolves on the next mousedown)
+    checkAudioUnlock(); // audio still locked → blocking unlock modal [SPEC-17.50]
     initMidiDispatch(); // route MIDI input → intents (works once MIDI connects)
     initLogCapture(); // surface Strudel warnings (e.g. missing samples) [SPEC-14.3]
     void loadDefaultSamples(); // preload the sound bank so PLAY is ready [SPEC-12.1]
@@ -33,8 +42,8 @@
     void connectMidi().catch(() => undefined);
     void reconnectStreamDeck().catch(() => undefined);
 
-    // No auto-unlock on interaction: audio starts only via ▶ Play,
-    // so clicking around never triggers sound/replay.
+    // Unlocking happens once, through the modal's button; playback still needs an
+    // explicit PLAY, so clicking around never triggers sound/replay.
   });
 </script>
 
@@ -78,6 +87,10 @@
 
 {#if $modalOpen}
   <SettingsModal />
+{/if}
+
+{#if $unlockNeeded}
+  <AudioUnlockModal />
 {/if}
 
 <Toasts />

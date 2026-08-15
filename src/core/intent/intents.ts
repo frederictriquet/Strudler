@@ -20,6 +20,12 @@ export type Intent =
   | { type: 'windowNext' } //                                          [SPEC-7.6]
   | { type: 'resync' } //                         reset quantization phase [SPEC-8.2, Q4]
   | { type: 'gridNudge'; beats: number } //  shift phase, signed (nano MARKER ◄►) [SPEC-17.34]
+  | { type: 'dropHold'; on: boolean } // held gesture: cut all but the kick [SPEC-17.40]
+  // Held global filter gestures: low-pass, high-pass, riser. [SPEC-17.41/17.42]
+  | { type: 'filterHold'; mode: 'lp' | 'hp' | 'riser'; on: boolean }
+  | { type: 'gateHold'; on: boolean } // held rhythmic gate [SPEC-17.44]
+  | { type: 'phaserHold'; on: boolean } // held global phaser [SPEC-17.46]
+  | { type: 'echoHold'; beats: number; on: boolean } // held tempo-locked echo [SPEC-17.47]
   | { type: 'sceneModeToggle' } //     arm/disarm scene storing (Stream Deck M+) [SPEC-17.36]
   | { type: 'scenePress'; index: number } // store or recall scene `index`   [SPEC-17.36]
   | { type: 'transportStart' } //                 (re)start the master clock (nano PLAY)

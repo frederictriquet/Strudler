@@ -1,15 +1,22 @@
 import type { TrackDefinition } from '@core/library/types';
 
-const E_MAJ = '[e1,e2,b3,g#3]';
-const GS_MIN = '[g#1,g#2,b3,d#3,b4]';
-const B_MAJ = '[b1,b2,f#2,b3,d#3]';
-const FS_MAJ = '[f#1,f#2,b3,c#3,a#4]';
+// Chord progression 6-1-3-7 in G# minor: E · G#m · B · F#.
+//
+// Written as chord SYMBOLS rather than absolute notes [SPEC-17.48]: `voicing()`
+// picks the inversion whose top note is closest to `anchor`, so the progression
+// stays in one register and voice-leads itself — and it survives transposition
+// instead of being dragged up or down as a block. `rootNotes(2)` keeps the bass
+// in a fixed octave underneath.
+const PROGRESSION = '<E G#m B F#>';
 
 const track: TrackDefinition = {
   name: 'G# min 6-1-3-7',
   beats: 16,
-  key: '1A', // reference key = G# minor → transposed to the selected key [SPEC-17.19]
-  pattern: `note("<${E_MAJ} ${GS_MIN} ${B_MAJ} ${FS_MAJ}>").s("piano").gain(0.7).room(0.25)`,
+  key: '1A', // reference key = G# minor [SPEC-17.19]
+  pattern: `stack(
+    chord("${PROGRESSION}").dict("triads").anchor("c4").voicing(),
+    chord("${PROGRESSION}").rootNotes(2).note()
+  ).s("piano").gain(0.7).room(0.25)`,
   tags: ['house', 'chords', 'piano', 'g#-minor', 'uplifting'],
 };
 

@@ -14,6 +14,7 @@
   import { placementMode, heldTrack } from '@stores/placementStore';
   import {
     slotLabel,
+    isMissingTrack,
     FX_KINDS,
     FX_META,
     type ChannelState,
@@ -126,22 +127,27 @@
         <div class="slots">
           {#each ch.slots as slot, s (s)}
             {@const prog = slotProgress(slot)}
+            {@const missing = isMissingTrack(slot) && slot.codeOverride === null}
             <button
               class="slot"
               class:playing={slot.playing && !slot.pending && !placingActive}
               class:pending-start={slot.pending && !slot.playing && !placingActive}
               class:pending-stop={slot.pending && slot.playing && !placingActive}
               class:place={authorized(ch)}
+              class:missing={missing && !placingActive}
               disabled={placingActive ? !authorized(ch) : !slot.trackId}
               title={placingActive
                 ? authorized(ch)
                   ? 'Placer la piste ici'
                   : 'Canal non compatible'
-                : (slot.trackName ?? 'vide')}
+                : missing
+                  ? `Piste introuvable dans la bibliothèque : ${slot.trackId}`
+                  : (slot.trackName ?? 'vide')}
               onclick={() => onSlot(ch.id, s, ch)}
             >
               <span class="slot-label">{slotLabel(s, ch.slots.length)}</span>
-              <span class="slot-track">{slot.trackName ?? '—'}</span>
+              <!-- Unresolved binding: show the id so the missing file is nameable. [SPEC-17.51] -->
+              <span class="slot-track">{missing ? `⚠ ${slot.trackId}` : (slot.trackName ?? '—')}</span>
               {#if prog >= 0}
                 <span class="slot-progress" style="width:{prog * 100}%"></span>
               {/if}
@@ -173,9 +179,9 @@
             class="fxbtn"
             class:on={ch.effects[ch.fxFocus].on}
             onclick={() => dispatch({ type: 'channelFxToggle', channel: ch.id })}
-            title={`${FX_META[ch.fxFocus].label} — activer/désactiver (nano M)`}
+            title={`${FX_META[ch.fxFocus].name} — activer/désactiver (nano M)`}
           >
-            {FX_META[ch.fxFocus].label}
+            {FX_META[ch.fxFocus].name}
           </button>
           <button
             class="fxnav"
@@ -192,8 +198,8 @@
               class:on={ch.effects[fx].on}
               class:focus={ch.fxFocus === fx}
               onclick={() => onFxToggle(ch.id, fx)}
-              title={`${FX_META[fx].label} — clic pour activer & sélectionner`}
-              aria-label={FX_META[fx].label}
+              title={`${FX_META[fx].name} — clic pour activer & sélectionner`}
+              aria-label={FX_META[fx].name}
             ></button>
           {/each}
         </div>
@@ -352,6 +358,14 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Unresolved binding: visibly broken, not silently empty. [SPEC-17.51] */
+  .slot.missing {
+    border-color: var(--danger);
+    background: rgba(248, 113, 113, 0.08);
+  }
+  .slot.missing .slot-track {
+    color: var(--danger);
+  }
   .slot.playing {
     border-color: var(--accent);
     background: rgba(110, 231, 183, 0.15);
@@ -418,10 +432,14 @@
   }
   .fxbtn {
     flex: 1;
+    min-width: 0; /* full effect names must ellipsize, never widen the channel */
     padding: 0.2rem 0;
     font-size: 0.68rem;
-    font-family: ui-monospace, monospace;
+    font-weight: 600;
     color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .fxbtn.on {
     color: var(--accent);

@@ -1,0 +1,4 @@
+name: Snap
+beats: 4
+pattern: |-
+  s("[ - cp:1]*2")

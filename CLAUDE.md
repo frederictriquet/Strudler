@@ -35,14 +35,15 @@ npm run samples:banks  # banques officielles Strudel : VCSL, drum-machines, mrid
 src/core/      logique métier, ZÉRO dépendance à l'UI
   engine/      StrudelEngine — Strudel isolé derrière une interface stable
   clock/       horloge maître (BPM, beats ; 1 cycle = 4 beats)
-  library/     pistes scannées via import.meta.glob
+  library/     pistes YAML scannées via import.meta.glob (?raw) + parse/validate
   channels/    ChannelRack — canaux, slots, volume, filtre, overrides de code
   launch/      Launcher — mode immédiat/quantisé, fenêtre W, pending
   midi/ mapping/ streamdeck/   contrôleurs → Intent
   intent/ session/ persist/    Intent unifié, journal de gestes, localStorage
 src/stores/    état applicatif (Svelte stores) — `rackStore.dispatch()` = point d'entrée unique
 src/lib/       composants Svelte
-library/       pistes : library/<catégorie>/<slug>.track.ts (export default TrackDefinition)
+library/       pistes : library/<catégorie>/<slug>.track.yaml (données, pas de code) [SPEC-4.6]
+               + track.schema.json (validation dans l'éditeur)
 vite-plugins/  soundsServer.ts — sert ~/Music/Sounds sous /sounds/ + génère /sounds/strudel.json
 ```
 
@@ -62,6 +63,7 @@ vite-plugins/  soundsServer.ts — sert ~/Music/Sounds sous /sounds/ + génère 
 - `@strudel/core` casse en introspection Node/`require` (résolution du champ `main`) ; il fonctionne via Vite. Ne pas en conclure à un bug.
 - Modifier `vite-plugins/soundsServer.ts` n'est **pas** pris par le HMR → redémarrer `npm run dev`.
 - Fermer le logiciel Elgato avant de connecter le Stream Deck (monopolise le HID).
+- Les pistes sont des **données YAML** `[SPEC-4.6]` : renommer/déplacer un fichier change l'id `catégorie/slug` et **délie les pads** (l'association est conservée et signalée, jamais purgée `[SPEC-17.51]`). Le `#` d'un nom d'accord (`G#m`) n'ouvre pas de commentaire YAML tant qu'il n'est pas précédé d'une espace.
 
 ## GUI
 

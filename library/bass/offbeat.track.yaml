@@ -1,0 +1,6 @@
+# Offbeat bassline sitting between the kicks — classic pumping House feel.
+name: Offbeat Bass
+beats: 4
+pattern: |-
+  note("~ c2 ~ c2 ~ eb2 ~ g2").s("jvbass").lpf(750).gain(0.9)
+tags: [house, bass, offbeat]

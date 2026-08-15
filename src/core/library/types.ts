@@ -5,7 +5,7 @@
 /** Supported loop lengths in beats. Extensible by design. [SPEC-4.2] */
 export type Beats = 4 | 8 | 16 | 32 | 64 | number;
 
-/** What a `*.track.ts` file exports as its default. [SPEC-4.2, PLAN C.1] */
+/** What a `*.track.yaml` file declares, once parsed and validated. [SPEC-4.2/4.6, PLAN C.1] */
 export interface TrackDefinition {
   /** Display name, unique within its category. */
   name: string;
@@ -28,7 +28,7 @@ export interface TrackManifestEntry {
   /** Stable id: `category/slug`. */
   id: string;
   category: string;
-  /** Filename slug (without the `.track.ts` suffix). */
+  /** Filename slug (without the `.track.yaml` suffix). */
   slug: string;
   name: string;
   beats: Beats;

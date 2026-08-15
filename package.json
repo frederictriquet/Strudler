@@ -19,7 +19,8 @@
     "@strudel/mini": "^1.1.0",
     "@strudel/tonal": "^1.2.6",
     "@strudel/transpiler": "^1.1.0",
-    "@strudel/webaudio": "^1.1.0"
+    "@strudel/webaudio": "^1.1.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^4.0.0",

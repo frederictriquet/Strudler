@@ -1,0 +1,16 @@
+# Classic four-on-the-floor House kick.
+#
+# Sidechain (ducking), for reference — not used here. `.duck(n)` makes THIS sound
+# lower the volume of channel n while it plays (one orbit per channel,
+# [SPEC-17.37]), which is how a kick makes a bass "breathe". Two traps:
+#   - `duckdepth(d)` cuts the target to 1−√d, so 0.8 leaves 11 % (nearly muted);
+#     0.3 (≈ −7 dB) is already plenty.
+#   - `duckattack` is the recovery time IN SECONDS. It must stay well under the
+#     gap between hits (0.5 s at 120 BPM), otherwise the level never climbs back
+#     and the target just sounds quiet instead of pumping.
+# Nothing is audible unless another sound is playing on the target channel.
+name: Dubbed kick
+beats: 4
+pattern: |-
+  s("<bd [rs ~ ~ rs] [~ ~ bd ~] rs>*4").speed(2).room(.2)
+tags: [house, kick, 4x4]

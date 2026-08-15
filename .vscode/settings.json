@@ -1,5 +1,11 @@
 {
     "files.associations": {
         "plyconfig.json": "jsonc"
+    },
+    // Validation + autocomplétion des pistes pendant la frappe (extension
+    // « YAML » de Red Hat). Remplace le typage TypeScript perdu en passant
+    // les pistes en YAML. [SPEC-4.6]
+    "yaml.schemas": {
+        "./library/track.schema.json": "library/**/*.track.yaml"
     }
 }

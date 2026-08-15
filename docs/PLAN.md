@@ -53,7 +53,9 @@ Découplage strict, dans l'esprit du moteur Sonic Pi déjà écrit (moteur agnos
 | `beats` | entier | longueur (4/8/16/32/64) |
 | `tags` | liste texte (opt.) | recherche/filtre |
 | `pattern` | code Strudel | la loop elle-même |
+| `vars` | table texte (opt.) | fragments réutilisés dans `pattern` via `${NOM}` `[SPEC-4.7]` |
 | `gain` | nombre (opt.) | niveau relatif de base |
+| `key` | texte (opt.) | tonalité de référence Camelot ; présent ⇒ piste transposable `[SPEC-17.19]` |
 
 ### C.2 Manifeste de bibliothèque — `[SPEC-4.3]`
 Liste des pistes (catégorie, nom, beats, tags, chemin). Régénérable par scan.
@@ -71,24 +73,23 @@ En-tête : version, tempo, état initial. Événements : `{ t (en beats), type, 
 
 ## D. Schéma de nommage & arborescence — `[SPEC-4.1/4.2/4.4]`
 
-Proposition (à confirmer) :
-
 ```
 library/
+  track.schema.json     # schéma JSON des pistes (validation dans l'éditeur)
   kick/
-    haus.track.ts
-    tek.track.ts
+    haus.track.yaml
+    tek.track.yaml
   hats/
-    offbeat.track.ts
+    offbeat.track.yaml
   snare/
   bass/
   lead/
   <catégorie>/
-    <slug>.track.ts
+    <slug>.track.yaml
 ```
 
-- **Dossier = catégorie** ; **fichier = `<slug>.track.ts`**.
-- Chaque fichier **exporte** ses métadonnées + son pattern (champs de C.1). La longueur en beats est une **métadonnée déclarée** (pas encodée dans le nom, pour rester lisible et modifiable).
+- **Dossier = catégorie** ; **fichier = `<slug>.track.yaml`**.
+- Chaque fichier **déclare** ses métadonnées + son pattern (champs de C.1) sous forme de **données**, pas de code `[SPEC-4.6]`. La longueur en beats est une **métadonnée déclarée** (pas encodée dans le nom, pour rester lisible et modifiable).
 - Un script de **scan** produit le manifeste (C.2). Ajouter une piste = déposer un fichier conforme + réindexer `[SPEC-4.4]`.
 - Nouvelle catégorie = nouveau dossier ; aucune modification du moteur/GUI.
 

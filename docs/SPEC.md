@@ -1,6 +1,6 @@
 # Strudler — Spécification fonctionnelle
 
-> Statut : v1. Reprend et enrichit `needs.md`. Voir [SPEC-17] pour les ajouts rédigés rétrospectivement (features demandées en cours de réalisation).
+> Statut : v1. Reprend et enrichit `needs.md`. Voir [SPEC-17] pour les ajouts rédigés rétrospectivement (features demandées en cours de réalisation), et [SPEC-18] pour l'atelier de composition (prospectif, non implémenté).
 > Plateforme retenue : **application web (TypeScript) bâtie sur Strudel core (`@strudel/*`) + Web MIDI API**.
 > Convention : chaque bloc est numéroté `[SPEC-N.M]` pour être référencé par le plan et le code.
 
@@ -64,6 +64,18 @@
 **[SPEC-4.4]** La bibliothèque est **extensible** : ajouter une piste = ajouter un fichier conforme + réindexer ; aucune modification du moteur ni de la GUI. De nouvelles catégories sont permises. `[needs:10]`
 
 **[SPEC-4.5]** Les pistes sont **isolées** : une piste ne dépend pas d'une autre.
+
+**[SPEC-4.6] Une piste est une donnée, pas du code.** Le fichier de piste est un document **YAML** (`library/<catégorie>/<slug>.track.yaml`) et non un module TypeScript. Motivations : une piste écrite par un **outil tiers** (éditeur de boucles, export) ne doit pas avoir à produire du code valide compilable ; un fichier peut être déposé, lu et écrit **hors du build**. Contraintes :
+- les fichiers sont chargés en **texte brut** et analysés à l'exécution — un fichier invalide est signalé avec son **chemin, sa ligne et sa colonne** `[SPEC-14.3]` **sans empêcher les autres pistes de se charger** (une bibliothèque partiellement cassée reste jouable) ;
+- toute **clé inconnue** est une erreur : une faute de frappe (`tag:` pour `tags:`) ne DOIT pas passer en silence ;
+- le champ `pattern` reste du **code Strudel** transporté dans une chaîne — il est évalué à l'arrivée, avec les mêmes garanties d'erreur que le mode avancé `[SPEC-9.2]` ;
+- la validation à l'édition est assurée par un **schéma JSON** (`library/track.schema.json`), associé aux pistes dans `.vscode/settings.json`, qui remplace le typage à la compilation perdu.
+
+Une piste rejetée DOIT être signalée par un **toast** au chargement, en plus de la liste du panneau bibliothèque : celui-ci se trouve sous la ligne de flottaison, et plus aucun garde-fou à la compilation n'existe depuis le passage aux données `[SPEC-17.26]`.
+
+*Impl. : `import.meta.glob('/library/**/*.track.yaml', { query: '?raw' })` + `parse`/`validate` dans `src/core/library/Library.ts`, dépendance `yaml`, schéma `library/track.schema.json` + `yaml.schemas` dans `.vscode/settings.json`, toasts `loadErrors` au montage dans `App.svelte`.*
+
+**[SPEC-4.7] Fragments réutilisables (`vars`).** Un fichier de piste PEUT déclarer une table `vars` de fragments de texte, substitués dans `pattern` par `${NOM}`. Cela remplace la constante locale qu'un fichier TypeScript permettait (écrire une progression d'accords **une seule fois** et la réutiliser dans plusieurs couches empilées). La **portée est le fichier** : deux pistes peuvent employer le même nom de variable sans interférer. Une variable **non définie** est une erreur de chargement explicite — jamais un `${...}` laissé tel quel dans le pattern, qui ferait échouer Strudel loin de la cause réelle. *Impl. : `interpolate()` dans `Library.ts`.*
 
 ---
 
@@ -210,7 +222,8 @@
 - Séquenceur d'arrangement de morceau complet.
 - Partage/export de sessions vers d'autres formats.
 - Le rendu visuel « grille de carrés » façon Strudel (playhead) : souhaitable, à intégrer dans la GUI [SPEC-10] en évolution.
-- **Sauvegarde d'une piste live-codée vers un fichier** : exporter l'override de code d'un slot (mode avancé [SPEC-9.2]) vers un `library/<catégorie>/<slug>.track.ts` (ou un dossier de pistes utilisateur), pour rendre permanente une évolution jouée en live. Aujourd'hui les éditions live sont en mémoire seulement. *(demandé — à faire plus tard)*
+- **Sauvegarde d'une piste live-codée vers un fichier** : exporter l'override de code d'un slot (mode avancé [SPEC-9.2]) vers un `library/<catégorie>/<slug>.track.yaml` (ou un dossier de pistes utilisateur), pour rendre permanente une évolution jouée en live. Aujourd'hui les éditions live sont en mémoire seulement. *(demandé — à faire plus tard ; c'est le sens retour du cycle décrit en [SPEC-18.1])*
+- **Atelier de composition** : spécifié en [SPEC-18], non implémenté.
 
 ---
 
@@ -271,7 +284,7 @@
 
 Motif : écrites en notes absolues, les progressions étaient **déplacées en bloc** par la transposition [SPEC-17.19] (`.add(note(N))`, jusqu'à ±6 demi-tons) — le registre dérivait et le voicing réglé à l'oreille perdait son équilibre. Avec `voicing()`, le renversement est **choisi** à chaque accord : `anchor` maintient la progression **dans un registre fixe** et la **conduite de voix** devient automatique, tandis que la basse reste dans son octave.
 
-Le dictionnaire **`triads`** est imposé explicitement : le défaut (`ireal`) produit des voicings de jazz avec septièmes et tensions, là où ces progressions veulent des triades simples. Nécessite `@strudel/tonal`, ajouté au scope d'évaluation. *Impl. : `import * as strudelTonal` + `evalScope(..., strudelTonal)` (`StrudelEngine`), déclaration de module dans `src/types/strudel.d.ts`, pistes `library/chords/*.track.ts`.*
+Le dictionnaire **`triads`** est imposé explicitement : le défaut (`ireal`) produit des voicings de jazz avec septièmes et tensions, là où ces progressions veulent des triades simples. Nécessite `@strudel/tonal`, ajouté au scope d'évaluation. *Impl. : `import * as strudelTonal` + `evalScope(..., strudelTonal)` (`StrudelEngine`), déclaration de module dans `src/types/strudel.d.ts`, pistes `library/chords/*.track.yaml`.*
 
 **[SPEC-17.47] Échos calés au tempo (4 et 16 beats) + point d'insertion master unique.** Trois gestes maintenus (rangée du milieu, **ECHO 1**, **ECHO 2** et **ECHO 4**) envoient l'ensemble du mix dans une ligne de delay dont le temps vaut **1, 2 ou 4 beats**, recalculé d'après le tempo à chaque appui. Réinjection ≈ 0,55, soit des répétitions à −5 dB l'une de l'autre : quelques échos audibles puis extinction.
 
@@ -329,7 +342,7 @@ Premier geste : **DROP** (dernière rangée, 1ʳᵉ touche, libellée et rouge q
 
 Sans danger sur une sortie stéréo : les orbits ne sont routés vers des paires de sorties distinctes que si `multiChannelOrbits` est activé, ce qui n'est pas le cas (défaut `false`).
 
-**Sémantique du duck, à connaître** : `duckdepth(d)` réduit le gain à `1−√d` (0,8 → 0,11, soit −19 dB, quasi une coupure) et `duckattack` est un **temps de remontée en secondes** — s'il dépasse l'intervalle entre deux déclenchements (0,5 s entre kicks à 120 BPM), le gain ne remonte jamais et le canal paraît simplement affaissé au lieu de pomper. Valeurs saines : `duckdepth(.3)`, `duckattack(.15)`. *Impl. : `.orbit(channel+1)` dans `StrudelEngine.voiceChain`, exemple documenté dans `library/kick/Dubbed kick.track.ts`.*
+**Sémantique du duck, à connaître** : `duckdepth(d)` réduit le gain à `1−√d` (0,8 → 0,11, soit −19 dB, quasi une coupure) et `duckattack` est un **temps de remontée en secondes** — s'il dépasse l'intervalle entre deux déclenchements (0,5 s entre kicks à 120 BPM), le gain ne remonte jamais et le canal paraît simplement affaissé au lieu de pomper. Valeurs saines : `duckdepth(.3)`, `duckattack(.15)`. *Impl. : `.orbit(channel+1)` dans `StrudelEngine.voiceChain`, exemple documenté dans `library/kick/Dubbed kick.track.yaml`.*
 
 **[SPEC-17.36] Scènes (Stream Deck, 1ʳᵉ rangée).** Une **scène** est l'**ensemble des slots armés**. Volumes et effets ne sont **pas** capturés : rappeler une scène ne doit jamais arracher un fader des mains — cohérent avec la reprise en main [SPEC-17.30].
 
@@ -395,3 +408,73 @@ Conséquence assumée : après un changement d'effet (S/R), le knob et le fader 
 **[SPEC-17.13] Fenêtre de quantisation de 128 beats.** Étend l'ensemble des tailles de fenêtre [SPEC-7.6] à **{4, 8, 16, 32, 64, 128}** beats, pour quantiser sur des phrases longues (32 mesures). *Impl. : `WINDOWS` dans `src/core/launch/Launcher.ts`.*
 
 **[SPEC-17.12] Repères de structure métrique dans l'affichage de position.** Dans le lecteur de position (un point par beat de la fenêtre), l'anneau des **débuts de mesure** (downbeats) DOIT être **coloré selon la plus grande puissance de 2 qui divise l'index du beat** — c.-à-d. la puissance de 2 sur laquelle la mesure démarre. Cela révèle la hiérarchie de phrase (mesure → 2 mesures → 4 → 8 → 16) d'un coup d'œil. Code couleur croissant (froid → chaud, anneau plus épais) : 4 beats, 8, 16, 32, 64 ; l'origine de la fenêtre (beat 0) a l'anneau le plus fort. Une **légende** rappelle la correspondance couleur ↔ puissance de 2. *Impl. : `ClockPanel.svelte` (`metricLevel`, `data-lvl`, légende).*
+
+---
+
+## [SPEC-18] Atelier de composition (Composer)
+
+> Spécification **prospective** : rien n'est implémenté à ce jour. Décrit une seconde page de l'application, orientée **fabrication et vérification** de boucles, dont le produit est un fichier de piste [SPEC-4.6] directement consommable par l'instrument.
+
+### Objet & frontière
+
+**[SPEC-18.1]** L'atelier sert à **fabriquer et vérifier** une boucle au calme ; l'instrument [SPEC-1.1] sert à la **jouer**. Les deux ne se recouvrent pas : l'atelier n'a ni canaux, ni contrôleurs de scène, ni quantisation, ni transport de performance ; l'instrument n'acquiert aucun outil d'édition assistée. Le **fichier YAML** de bibliothèque est leur unique point de rendez-vous, dans les deux sens : l'atelier écrit une piste [SPEC-18.15], l'instrument la charge [SPEC-4.4] et peut lui renvoyer un code live-codé [SPEC-15].
+
+**[SPEC-18.2]** Objectif d'ergonomie : être **plus facile à prendre en main que le REPL de Strudel**, pour un utilisateur qui code mais ne maîtrise pas le solfège. Trois difficultés sont visées nommément — la page blanche [SPEC-18.11], la densité de la mini-notation [SPEC-18.13], et l'absence de retour visuel entre ce qu'on écrit et ce qu'on entend [SPEC-18.8].
+
+### Hébergement & isolation
+
+**[SPEC-18.3] Second document, pas une route.** L'atelier DOIT être un **point d'entrée HTML distinct** (`composer.html`) servi par le même projet Vite, et NON une vue supplémentaire de l'application de jeu. Motifs, par ordre d'importance :
+- **le moteur audio est un singleton** — `StrudelEngine` possède l'`AudioContext`, les orbites, le hub d'insert master et les `ref` live [SPEC-17.37] ; partager le document ferait passer les auditions de l'atelier par les orbites, les effets de canal et les gestes tenus éventuellement armés, alors que la composition exige un signal **propre et sec**. Deux documents ⇒ deux `AudioContext` ⇒ isolation obtenue sans code ;
+- **sécurité de scène** — un clic ne DOIT pas pouvoir faire basculer l'instrument en mode composition pendant un set ; une URL distincte impose de quitter délibérément la page de jeu ;
+- **mise en page** — l'instrument doit tenir sans défilement [SPEC-17.2], l'atelier réclame de la place ; deux documents, deux feuilles de style, aucun enchevêtrement.
+
+**[SPEC-18.4] Cloisonnement des imports.** L'atelier DOIT n'importer que depuis `src/core/` ; les imports depuis `@stores/` et `@lib/` sont **interdits**. `rackStore` exécute du travail au niveau module (restauration du rack depuis `localStorage`, abonnements, `setSlotsPerChannel`) : un simple `import` démarrerait l'instrument en effet de bord **et réécrirait la session de l'utilisateur** [SPEC-17.51]. La règle est volontairement mécanique donc vérifiable.
+
+**[SPEC-18.5] Réutilisation sans refonte.** L'atelier réutilise `StrudelEngine`, `camelot.ts`, les types de bibliothèque et `track.schema.json` **tels quels**. Aucune refonte préalable de `StrudelEngine` n'est requise : le mécanisme dont dépend la vue dérivée [SPEC-18.6] est celui de `measureLengthBeats()`, qui crée déjà un repl jetable **indépendant du graphe audio de jeu**. Ce fichier concentre trop de connaissances acquises sur superdough pour être refactorisé par confort.
+
+### Principe directeur : le code reste la source de vérité
+
+**[SPEC-18.6] Vues dérivées, jamais autoritaires.** Le **texte du pattern** est la source de vérité. Tout ce que l'atelier affiche d'une boucle DOIT être **dérivé** de ce texte par **interrogation du pattern** (`queryArc`), jamais reconstruit à partir d'un modèle parallèle. Conséquence recherchée : une piste éditée à la main — dans l'atelier, dans un éditeur de texte, ou en live dans l'instrument [SPEC-9.2] — reste lisible par l'atelier sans qu'aucun parseur de code Strudel ne soit nécessaire, et aucune structure ne peut diverger silencieusement du code.
+
+**[SPEC-18.7] Assistants générateurs à sens unique.** Les aides à l'écriture [SPEC-18.9] **produisent un fragment de code inséré dans le texte**, puis s'en désintéressent. Elles ne possèdent pas ce qu'elles ont écrit et ne cherchent pas à le relire. Cette règle, jointe à [SPEC-18.6], supprime par construction le problème de l'aller-retour.
+
+**[SPEC-18.8] Vue par interrogation (« piano roll »).** L'atelier DOIT afficher les **événements produits** par le pattern sur N cycles : hauteur ou nom de son en ordonnée, temps en abscisse. C'est la fonctionnalité **centrale** — celle qui permet de comparer d'un coup d'œil ce qu'on a écrit à une référence externe (capture d'écran d'un tutoriel, par exemple), et de constater ce que produisent réellement les fonctions opaques comme `voicing()`. Deux corollaires en découlent gratuitement :
+- la **longueur de boucle** devient visible (la répétition se voit) et DOIT préremplir le champ `beats` du fichier [SPEC-4.2], au lieu d'être devinée ;
+- la vue DOIT rester exacte pour les patterns non déterministes, en signalant l'absence de période plutôt qu'en inventant une longueur [SPEC-17.11].
+
+### Structure & assistants
+
+**[SPEC-18.9] Les couches, seule structure possédée.** L'atelier PEUT modéliser une boucle comme une **liste de couches**, chacune étant du **texte libre**, le `stack(...)` étant produit à l'export. C'est la **seule** notion structurelle que l'atelier s'autorise à posséder, parce qu'elle est mécanique et réversible : relire un `stack(` de premier niveau relève de l'appariement de parenthèses, pas d'un parseur JavaScript. Elle apporte :
+- le **solo / mute par couche** — auditionner la basse seule, équivalent du solo sur une tranche de console, et principal outil d'apprentissage ;
+- une vue par interrogation **par couche**, superposable.
+Une piste dont le `pattern` n'est pas un `stack()` de premier niveau est traitée comme une couche unique.
+
+**[SPEC-18.10] Assistants d'écriture.** Chacun est un générateur au sens de [SPEC-18.7] :
+- **Progressions par degrés** — saisir une tonalité et des **degrés** (« 6-1-3-7 en si mineur ») produit les symboles d'accords, le fragment `chord("<...>")` et remplit le champ `key` en notation Camelot [SPEC-17.14]. Cible le flux réel : une consigne lue dans un tutoriel vidéo, sans passer par le solfège.
+- **Grille de batterie** — grille de pas ↔ mini-notation. C'est le **seul** endroit où un éditeur véritablement bidirectionnel est admis : le sous-ensemble de syntaxe concerné (`~`, `*`, `[]`, `!`) est assez étroit pour être relu sans risque. Hors de ce sous-ensemble, la grille passe en lecture seule plutôt que de réécrire ce qu'elle ne comprend pas.
+- **Roue euclidienne** — représentation circulaire de `s("bd(3,8)")`, notation puissante et illisible sans support visuel.
+- **Navigateur de sons** — parcourt la **même banque** que l'instrument (`/sounds/strudel.json`, [SPEC-12]), permet d'**auditionner** un échantillon et d'insérer son nom.
+
+**[SPEC-18.11] Démarrage à partir de l'existant.** Créer une piste DOIT pouvoir se faire **à partir d'une piste de la bibliothèque**, qui sert de recette. Réponse directe au problème de la page blanche [SPEC-18.2] : la bibliothèque est déjà un jeu d'exemples fonctionnels.
+
+**[SPEC-18.12] Contexte de jeu.** L'atelier DOIT permettre de fixer le **BPM** et la **tonalité Camelot** d'audition, afin que ce qui est entendu pendant l'écriture corresponde au contexte de destination — la finalité étant de jouer par-dessus un mix externe dont la tonalité est connue [SPEC-17.14].
+
+**[SPEC-18.13] Aide contextuelle.** L'atelier PEUT expliquer le **fragment sous le curseur** (« `*4` : répète 4 fois dans le cycle ») et permettre d'**isoler** un fragment sélectionné pour n'entendre et ne voir que lui. Une explication qui arrive au moment où la question se pose remplace avantageusement la consultation de la documentation.
+
+### Fichier, écriture et cycle
+
+**[SPEC-18.14] Panneau YAML visible.** Le fichier DOIT être affiché et **éditable directement**, en cohérence avec la nature « données » des pistes [SPEC-4.6]. L'atelier ne masque pas le format : l'utilisateur doit pouvoir continuer à écrire ses pistes à la main sans l'atelier.
+
+**[SPEC-18.15] Écriture dans la bibliothèque.** L'atelier DOIT pouvoir écrire `library/<catégorie>/<slug>.track.yaml` **directement**, via la File System Access API (Chrome, déjà requis pour Web MIDI et WebHID [SPEC-14.1]) : le dossier est autorisé une fois, les enregistrements suivants ne redemandent rien. Contraintes :
+- le **nom de fichier et le dossier déterminent l'identifiant** `catégorie/slug` : renommer ou déplacer **délie les pads** de l'instrument (association conservée et signalée, jamais purgée [SPEC-17.51]). L'atelier DOIT avertir avant un renommage qui change un identifiant existant ;
+- l'écrasement d'une piste existante DOIT être explicite.
+
+**[SPEC-18.16] Validation.** Une piste DOIT être validée **avant écriture** contre `library/track.schema.json` — le même schéma que celui utilisé par l'éditeur et par le chargeur [SPEC-4.6] —, et son `pattern` DOIT être évalué au moins une fois sans erreur. Aucun fichier invalide n'est écrit dans la bibliothèque.
+
+**[SPEC-18.17] Cycle atelier → instrument.** Les deux pages étant servies par le même serveur Vite, elles voient la même bibliothèque sur disque et la même banque de sons. Enregistrer dans l'atelier DOIT faire apparaître la piste dans l'instrument sans manipulation : le watcher détecte le fichier et l'instrument se recharge [SPEC-17.31]. Ce cycle est la principale justification du second document plutôt que d'un projet séparé.
+
+### Limites
+
+**[SPEC-18.18] Contrôleurs matériels : hors périmètre initial.** L'atelier est piloté **souris/clavier**. Si les deux pages sont ouvertes simultanément, elles ouvrent les mêmes ports MIDI : les entrées se partagent, mais les **sorties LED entreraient en conflit** (deux pages écrivant l'état des pads). Piloter la grille de batterie depuis l'APC reste envisageable, mais suppose de traiter d'abord cette exclusivité.
+
+**[SPEC-18.19] Hors périmètre.** Ne relèvent PAS de l'atelier : un IDE Strudel généraliste ; un parseur de code Strudel arbitraire [SPEC-18.6] ; une ré-implémentation du live-coding, déjà couverte par le mode avancé de l'instrument [SPEC-9.2] ; l'arrangement d'un morceau complet [SPEC-15].

@@ -67,7 +67,7 @@ Suivi par phases (`docs/PLAN.md` section E).
 - [x] **Phase 1 — Clock + Engine** : horloge maître (BPM/beats, 1 cycle = 4 beats),
   play/stop d'une loop, volume par canal (effet immédiat via `ref`). Jalon « une loop
   tourne à 120 BPM ».
-- [x] **Phase 2 — Bibliothèque + mode simple** : schéma `library/<catégorie>/<slug>.track.ts`,
+- [x] **Phase 2 — Bibliothèque + mode simple** : schéma `library/<catégorie>/<slug>.track.yaml`,
   manifeste via `import.meta.glob` (= scan, HMR, zéro rebuild), chargement et lecture d'une
   piste du disque. Jalon « charger et jouer une piste du disque ».
 - [x] **Phase 3 — Canaux + MIDI in/out (MVP)** : modèle de canaux (catégories, slots S/M/R→pistes,
@@ -124,7 +124,8 @@ src/
   App.svelte
   main.ts
   app.css
-library/                # [SPEC-4] pistes : library/<catégorie>/<slug>.track.ts
+library/                # [SPEC-4] pistes : library/<catégorie>/<slug>.track.yaml
+  track.schema.json     #           schéma JSON des pistes (validation dans l'éditeur)
   kick/ hats/ snare/ bass/ lead/ pad/
 docs/                   # SPEC.md, PLAN.md
 study/                  # matériel de référence (expérimentations, nanoKONTROL2…)
@@ -132,10 +133,39 @@ study/                  # matériel de référence (expérimentations, nanoKONTR
 
 ### Ajouter une piste [SPEC-4.4]
 
-Déposer un fichier `library/<catégorie>/<slug>.track.ts` exportant par défaut un
-`TrackDefinition` (`name`, `beats`, `pattern` Strudel, `tags?`, `gain?`). La catégorie
-est le dossier. Il est pris en compte automatiquement (HMR en dev), sans toucher au
-moteur ni à la GUI. Une nouvelle catégorie = un nouveau dossier.
+Déposer un fichier `library/<catégorie>/<slug>.track.yaml`. La catégorie est le dossier.
+Il est pris en compte automatiquement (HMR en dev), sans toucher au moteur ni à la GUI.
+Une nouvelle catégorie = un nouveau dossier.
+
+```yaml
+# Commentaire libre : d'où vient la boucle, comment elle est construite…
+name: Snare 808          # obligatoire — unique dans la catégorie
+beats: 4                 # obligatoire — 1 cycle Strudel = 4 beats
+pattern: |-              # obligatoire — le code Strudel ; « |- » = bloc multi-lignes
+  s("~ 808sd:4 ~ 808sd:4").gain(0.75).room(0.15)
+tags: [house, snare, 808]
+gain: 0.9                # optionnel — niveau relatif de base
+key: 8A                  # optionnel — tonalité Camelot ; présent ⇒ piste transposable
+```
+
+Un fragment répété (progression d'accords…) s'écrit **une seule fois** dans `vars` et
+se substitue dans `pattern` via `${NOM}` `[SPEC-4.7]` — la portée est le fichier :
+
+```yaml
+vars:
+  PROGRESSION: <E G#m B F#>
+pattern: |-
+  stack(
+    chord("${PROGRESSION}").dict("triads").anchor("c4").voicing(),
+    chord("${PROGRESSION}").rootNotes(2).note()
+  ).s("piano")
+```
+
+**Validation** : `library/track.schema.json` est associé aux pistes dans
+`.vscode/settings.json` — avec l'extension **YAML** de Red Hat, VS Code complète les
+champs et signale les erreurs pendant la frappe. Au chargement, un fichier invalide
+n'empêche **pas** les autres de se charger : il est signalé dans l'UI avec sa ligne
+et sa colonne `[SPEC-14.3]`.
 
 ## Conventions
 

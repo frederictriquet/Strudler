@@ -18,7 +18,8 @@
     checkAudioUnlock,
   } from '@stores/rackStore';
   import { settingsOpen } from '@stores/uiStore';
-  import { notices, clearNotices, initLogCapture } from '@stores/logStore';
+  import { notices, clearNotices, initLogCapture, notify } from '@stores/logStore';
+  import { loadErrors } from '@stores/libraryStore';
   import { loadDefaultSamples } from '@stores/samplesStore';
   import { connectMidi } from '@stores/midiStore';
   import { reconnectStreamDeck } from '@stores/streamdeckStore';
@@ -34,6 +35,13 @@
     checkAudioUnlock(); // audio still locked → blocking unlock modal [SPEC-17.50]
     initMidiDispatch(); // route MIDI input → intents (works once MIDI connects)
     initLogCapture(); // surface Strudel warnings (e.g. missing samples) [SPEC-14.3]
+
+    // Tracks are hand-written YAML data since [SPEC-4.6]: nothing catches a typo
+    // at build time any more, so a rejected track must be impossible to miss —
+    // the library panel listing them sits below the fold. [SPEC-14.3, SPEC-17.26]
+    for (const err of loadErrors) {
+      notify('error', `Piste ignorée — ${err.path.replace('/library/', '')} : ${err.message}`);
+    }
     void loadDefaultSamples(); // preload the sound bank so PLAY is ready [SPEC-12.1]
 
     // Auto-connect controllers. MIDI needs no user gesture (permission is

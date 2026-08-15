@@ -1,0 +1,6 @@
+# Syncopated conga/tumbao-ish perc pattern.
+name: Conga
+beats: 4
+pattern: |-
+  s("~ perc ~ perc perc ~ perc ~").speed("1 1.5").gain(0.45)
+tags: [house, perc, conga]

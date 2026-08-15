@@ -1,0 +1,6 @@
+# Busy sixteenth-note closed hats with a subtle accent.
+name: Closed 16
+beats: 4
+pattern: |-
+  s("hh*16").gain("[0.45 0.28]*8")
+tags: [house, hats, closed]

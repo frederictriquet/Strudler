@@ -1,0 +1,6 @@
+# Syncopated rimshot groove for movement.
+name: Rim Groove
+beats: 4
+pattern: |-
+  s("~ rs ~ [rs rs] ~ rs ~ rs").gain(0.5)
+tags: [house, rim, groove]

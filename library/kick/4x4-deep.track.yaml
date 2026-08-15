@@ -1,0 +1,6 @@
+# Deeper kick (pitched down a touch) for deep-house grooves.
+name: 4x4 Deep
+beats: 4
+pattern: |-
+  s("bd*4").speed(0.9).lpf(2000).gain(0.95)
+tags: [house, kick, deep]

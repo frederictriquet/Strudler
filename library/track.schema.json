@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://strudler.local/track.schema.json",
+  "title": "Piste Strudler",
+  "description": "Une boucle jouable. Un fichier = une piste, rangée dans library/<catégorie>/<slug>.track.yaml. [SPEC-4]",
+  "type": "object",
+  "required": ["name", "beats", "pattern"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Nom affiché, unique dans sa catégorie (= le dossier parent)."
+    },
+    "beats": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Longueur de la boucle en beats. 1 cycle Strudel = 4 beats. Valeurs usuelles : 4, 8, 16, 32, 64.",
+      "examples": [4, 8, 16, 32, 64]
+    },
+    "pattern": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Le code Strudel de la boucle. Utiliser un bloc « |- » pour du multi-lignes. Peut contenir des ${VARIABLES} définies dans `vars`."
+    },
+    "vars": {
+      "type": "object",
+      "description": "Fragments réutilisables substitués dans `pattern` via ${NOM}. Portée : ce fichier uniquement.",
+      "additionalProperties": { "type": ["string", "number"] },
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+    },
+    "tags": {
+      "type": "array",
+      "description": "Mots-clés de recherche/filtrage.",
+      "items": { "type": "string" }
+    },
+    "gain": {
+      "type": "number",
+      "description": "Niveau relatif de base de la piste."
+    },
+    "key": {
+      "type": "string",
+      "pattern": "^(1[0-2]|[1-9])[AB]$",
+      "description": "Tonalité de référence en notation Camelot (1A-12A mineur, 1B-12B majeur). Présent ⇒ la piste est mélodique et suit la tonalité choisie ; absent ⇒ jamais transposée (percussions).",
+      "examples": ["1A", "8A", "8B", "12B"]
+    }
+  }
+}

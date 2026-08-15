@@ -1,0 +1,13 @@
+# [SPEC-4] 32-beat open-hat phrase from the 808oh set (5 samples, index 0..4).
+# 1 cycle = 4 beats, so 32 beats = 8 cycles. The `<...>` alternation advances
+# one value per cycle, spanning the full 8-bar phrase:
+#   - base: offbeat "tss" every bar, sample index sweeping 0→4→1 for tonal drift
+#   - fill: silent for 7 bars, then a fast 8-hit roll on the last bar
+name: Open 808 32
+beats: 32
+pattern: |-
+  stack(
+    s("~ 808oh ~ 808oh ~ 808oh ~ 808oh").n("<0 1 2 3 4 3 2 1>").gain(0.5),
+    s("<~ ~ ~ ~ ~ ~ ~ [808oh*8]>").n(4).speed(1.5).gain(0.4)
+  ).room(0.2)
+tags: [house, hats, open, '808', 32-beat]

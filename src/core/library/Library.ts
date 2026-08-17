@@ -13,15 +13,10 @@
 // The price is losing compile-time checking; `library/track.schema.json` gives it
 // back in the editor, and `validate()` below enforces it at load.
 
-import { parse as parseYaml, YAMLParseError } from 'yaml';
+import { parse as parseYaml } from 'yaml';
 import { fullReloadOnHmr } from '@core/persist/hmr';
-import type {
-  LibraryIndex,
-  LoadedTrack,
-  TrackDefinition,
-  TrackLoadError,
-  TrackManifestEntry,
-} from './types';
+import { validateTrackDoc, yamlErrorMessage } from './validate';
+import type { LibraryIndex, LoadedTrack, TrackLoadError, TrackManifestEntry } from './types';
 
 // Raw text of every track file. Path is rooted at the Vite project root.
 const modules = import.meta.glob<string>('/library/**/*.track.yaml', {
@@ -30,13 +25,6 @@ const modules = import.meta.glob<string>('/library/**/*.track.yaml', {
   import: 'default',
 });
 
-const VALID_BEATS = new Set([4, 8, 16, 32, 64]);
-
-/** Every key a track file may declare — mirrors `library/track.schema.json`.
- *  Anything else is a typo (`tag:` for `tags:`) and must not pass silently. */
-const KNOWN_KEYS = ['name', 'beats', 'pattern', 'vars', 'tags', 'gain', 'key'] as const;
-const KNOWN_KEY_SET: ReadonlySet<string> = new Set(KNOWN_KEYS);
-
 /** Parse `/library/<category>/<slug>.track.yaml` → { category, slug }. */
 function parsePath(path: string): { category: string; slug: string } | null {
   const match = path.match(/\/library\/([^/]+)\/([^/]+)\.track\.yaml$/);
@@ -44,99 +32,9 @@ function parsePath(path: string): { category: string; slug: string } | null {
   return { category: match[1], slug: match[2] };
 }
 
-/**
- * Substitute `${VAR}` in the pattern from the file's own `vars` map. [SPEC-4.7]
- *
- * This is what a `const` did in the old TypeScript tracks: write a chord
- * progression once, reuse it across the stacked layers. Scope is the file, so two
- * tracks may use the same variable name without interfering — which was NOT true
- * of module-level consts. An unresolved `${...}` is an error, never a literal
- * left in the pattern (Strudel would then fail far from the real cause).
- *
- * Returns the expanded pattern, or the list of missing variable names.
- */
-function interpolate(pattern: string, vars: Record<string, string>): string | string[] {
-  const missing: string[] = [];
-  const out = pattern.replace(/\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}/g, (_match, name: string) => {
-    const value = vars[name];
-    if (value === undefined) {
-      missing.push(name);
-      return '';
-    }
-    return value;
-  });
-  return missing.length > 0 ? missing : out;
-}
-
-/** Validate one parsed document: the definition, or a message explaining why not. */
-function validate(doc: unknown): TrackDefinition | string {
-  if (doc === null || doc === undefined) return 'fichier vide';
-  if (typeof doc !== 'object' || Array.isArray(doc)) {
-    return 'le fichier doit contenir un objet YAML (clé: valeur), pas une liste ni une valeur seule';
-  }
-  const raw = doc as Record<string, unknown>;
-
-  const unknown = Object.keys(raw).filter((k) => !KNOWN_KEY_SET.has(k));
-  if (unknown.length > 0) {
-    return `clé inconnue : ${unknown.map((k) => `\`${k}\``).join(', ')} (attendu : ${KNOWN_KEYS.join(', ')})`;
-  }
-
-  if (typeof raw.name !== 'string' || raw.name.trim() === '') return 'champ `name` manquant';
-  if (typeof raw.beats !== 'number' || !Number.isFinite(raw.beats) || raw.beats <= 0) {
-    return 'champ `beats` invalide (nombre de beats > 0 attendu)';
-  }
-  if (!VALID_BEATS.has(raw.beats)) {
-    // Non-standard length is allowed by [SPEC-4.2] "et arbitraire par extension";
-    // not an error, just uncommon.
-  }
-  if (typeof raw.pattern !== 'string' || raw.pattern.trim() === '') return 'champ `pattern` manquant';
-  if (raw.tags !== undefined && (!Array.isArray(raw.tags) || raw.tags.some((t) => typeof t !== 'string'))) {
-    return 'champ `tags` invalide (liste de chaînes attendue)';
-  }
-  if (raw.gain !== undefined && (typeof raw.gain !== 'number' || !Number.isFinite(raw.gain))) {
-    return 'champ `gain` invalide (nombre attendu)';
-  }
-  if (raw.key !== undefined && (typeof raw.key !== 'string' || raw.key.trim() === '')) {
-    return 'champ `key` invalide (code Camelot attendu, ex. « 8A »)';
-  }
-
-  const vars: Record<string, string> = {};
-  if (raw.vars !== undefined) {
-    if (typeof raw.vars !== 'object' || raw.vars === null || Array.isArray(raw.vars)) {
-      return 'champ `vars` invalide (objet `nom: valeur` attendu)';
-    }
-    for (const [name, value] of Object.entries(raw.vars as Record<string, unknown>)) {
-      if (typeof value !== 'string' && typeof value !== 'number') {
-        return `variable \`${name}\` invalide (chaîne ou nombre attendu)`;
-      }
-      vars[name] = String(value);
-    }
-  }
-
-  const pattern = interpolate(raw.pattern, vars);
-  if (Array.isArray(pattern)) {
-    return `variable non définie dans \`vars\` : ${pattern.map((n) => `\${${n}}`).join(', ')}`;
-  }
-
-  return {
-    name: raw.name,
-    beats: raw.beats,
-    pattern,
-    tags: raw.tags as string[] | undefined,
-    gain: raw.gain as number | undefined,
-    key: raw.key as string | undefined,
-  };
-}
-
-/** Turn a YAML syntax error into something that points at the offending line. */
-function yamlErrorMessage(error: unknown): string {
-  if (error instanceof YAMLParseError) {
-    const pos = error.linePos?.[0];
-    const where = pos ? ` (ligne ${pos.line}, colonne ${pos.col})` : '';
-    return `YAML invalide${where} : ${error.message.split('\n')[0]}`;
-  }
-  return `YAML invalide : ${error instanceof Error ? error.message : String(error)}`;
-}
+// `${VAR}` substitution lives in serialize.ts and field validation in validate.ts
+// [SPEC-4.7, SPEC-4.6]: the composition workshop must expand and validate EXACTLY
+// the way this loader does, otherwise it could write files the instrument rejects.
 
 function buildIndex(): LibraryIndex {
   const tracks: LoadedTrack[] = [];
@@ -158,7 +56,7 @@ function buildIndex(): LibraryIndex {
       continue;
     }
 
-    const result = validate(doc);
+    const result = validateTrackDoc(doc);
     if (typeof result === 'string') {
       errors.push({ path, message: result });
       continue;
@@ -185,6 +83,8 @@ function buildIndex(): LibraryIndex {
       gain: result.gain,
       key: result.key,
       pattern: result.pattern,
+      patternSource: result.patternSource,
+      vars: result.vars,
       path,
     });
   }
@@ -207,7 +107,9 @@ export class Library {
 
   /** Manifest (metadata only). [SPEC-4.3] */
   get manifest(): TrackManifestEntry[] {
-    return this.index.tracks.map(({ pattern: _pattern, ...entry }) => entry);
+    return this.index.tracks.map(
+      ({ pattern: _p, patternSource: _ps, vars: _v, ...entry }) => entry,
+    );
   }
 
   /** Distinct categories, sorted. */

@@ -51,6 +51,23 @@ const getSuperdoughAudioController = (
 
 export type EngineStatus = 'idle' | 'starting' | 'ready' | 'playing' | 'error';
 
+/**
+ * One event produced by a pattern, as returned by `queryEvents`. [SPEC-18.8]
+ * Times are in CYCLES from the start of the query (1 cycle = 4 beats).
+ */
+export interface HapInfo {
+  /** Clipped start/end inside the queried span. */
+  begin: number;
+  end: number;
+  /** The event's true extent, which may exceed the queried span. */
+  wholeBegin: number;
+  wholeEnd: number;
+  /** False for a fragment whose attack happened before the queried span. */
+  hasOnset: boolean;
+  /** Control values (`s`, `n`, `note`, `gain`, …) as plain data. */
+  value: Record<string, unknown>;
+}
+
 type Repl = ReturnType<typeof repl>;
 
 export const DEFAULT_CHANNEL_GAIN = 0.8;
@@ -420,6 +437,60 @@ export class StrudelEngine implements TimeSource {
       },
     });
     return this.measureRepl;
+  }
+
+  /**
+   * Query a pattern's events over `cycles` cycles, without any audio. [SPEC-18.8]
+   *
+   * Same mechanism as measureLengthBeats (throwaway repl, never started), exposed
+   * so a caller can DERIVE a view — a piano roll, a step grid — from what the
+   * pattern actually produces, rather than from a parallel model that could drift
+   * from the code [SPEC-18.6]. Keeping it here upholds the rule that only the
+   * engine talks to Strudel ([PLAN F]).
+   *
+   * Throws on an eval/query error so the caller can report "code invalide".
+   */
+  async queryEvents(code: string, cycles: number): Promise<HapInfo[]> {
+    await this.scopeReady;
+    const r = this.ensureMeasureRepl();
+    this.lastEvalError = null;
+    const evaluated = await r.evaluate(code, false); // autostart false → no scheduler, no sound
+    if (this.lastEvalError) throw this.lastEvalError;
+    const pattern = evaluated as { queryArc?: (b: number, e: number) => unknown[] } | undefined;
+    if (!pattern || typeof pattern.queryArc !== 'function') {
+      throw new Error('Pattern invalide');
+    }
+
+    type RawHap = {
+      part: { begin: unknown; end: unknown };
+      whole?: { begin: unknown; end: unknown };
+      value: unknown;
+      hasOnset?: () => boolean;
+    };
+    let haps: RawHap[];
+    try {
+      haps = pattern.queryArc(0, cycles) as RawHap[];
+    } catch (err) {
+      throw new Error(`Requête du pattern impossible : ${(err as Error).message}`);
+    }
+
+    return haps.map((h) => {
+      // `whole` carries the event's real extent; `part` is the clipped fragment
+      // inside the queried span. Prefer whole for the drawn duration.
+      const span = h.whole ?? h.part;
+      const value =
+        h.value !== null && typeof h.value === 'object'
+          ? ({ ...(h.value as Record<string, unknown>) } as Record<string, unknown>)
+          : ({ value: h.value } as Record<string, unknown>);
+      return {
+        begin: Number(h.part.begin),
+        end: Number(h.part.end),
+        wholeBegin: Number(span.begin),
+        wholeEnd: Number(span.end),
+        hasOnset: h.hasOnset ? h.hasOnset() : true,
+        value,
+      };
+    });
   }
 
   /**

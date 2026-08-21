@@ -2,12 +2,18 @@
 // the instrument, so it gets its own AudioContext and cannot be reached by a
 // stray click during a set. No Service Worker here: sample caching belongs to the
 // performance page.
-import { mount } from 'svelte';
-import Composer from './Composer.svelte';
 import '../app.css';
+import { restoreFromDiskIfEmpty, requestPersistentStorage } from '@core/persist/backup';
 
-const app = mount(Composer, {
-  target: document.getElementById('composer')!,
-});
+// [SPEC-13.8] Same ordering as the instrument: `composerStore` restores the draft
+// while its module is evaluated, so the disk copy must land first — hence the
+// dynamic import below.
+void (async () => {
+  await restoreFromDiskIfEmpty();
+  void requestPersistentStorage();
 
-export default app;
+  const { mount } = await import('svelte');
+  const Composer = (await import('./Composer.svelte')).default;
+
+  mount(Composer, { target: document.getElementById('composer')! });
+})();

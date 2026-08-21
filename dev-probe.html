@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Sonde de développement</title>
+  </head>
+  <body>
+    <!--
+      Sonde générique, servie par le serveur de dev uniquement — `vite.config.ts`
+      ne liste que index.html et composer.html dans `build.rollupOptions.input`,
+      donc cette page n'entre pas dans le build de production.
+
+      Elle existe pour ne plus écrire une page jetable par question : le JS à
+      évaluer arrive dans `?e=`, avec le moteur déjà armé et les modules utiles
+      préchargés. Voir `npm run probe` (scripts/probe.mjs).
+    -->
+    <pre id="out" style="white-space: pre-wrap; font: 12px ui-monospace, monospace">…</pre>
+    <script type="module">
+      const el = document.getElementById('out');
+      el.textContent = '';
+      const say = (...a) =>
+        (el.textContent +=
+          a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ') + '\n');
+      window.onerror = (m) => say('ONERROR', m);
+      window.onunhandledrejection = (e) => say('REJET', e.reason?.message ?? String(e.reason));
+
+      try {
+        const engine = (await import('/src/core/engine/StrudelEngine.ts')).engine;
+        // Registers the eval scope: without it every pattern fails with «s is not defined».
+        engine.arm();
+        const q = new URLSearchParams(location.search);
+        const ctx = {
+          say,
+          engine,
+          notes: await import('/src/core/music/notes.ts'),
+          chords: await import('/src/core/music/chords.ts'),
+          camelot: await import('/src/core/music/camelot.ts'),
+          detect: await import('/src/core/music/chordDetect.ts'),
+          probe: await import('/src/core/composer/chordProbe.ts'),
+          roll: await import('/src/core/composer/roll.ts'),
+          banks: await import('/src/core/engine/sampleBanks.ts'),
+          library: (await import('/src/core/library/Library.ts')).library,
+          // Opt-in: importing the store has side effects (workspace restore).
+          store: q.get('store') === '1' ? await import('/src/composer/state/composerStore.ts') : null,
+          get: (await import('svelte/store')).get,
+        };
+        if (q.get('banks') === '1') await ctx.banks.loadAllBanks(engine);
+
+        const source = q.get('e') ?? 'say("rien à évaluer")';
+        // eslint-disable-next-line no-new-func -- a dev-only scratch evaluator
+        const run = new Function(
+          ...Object.keys(ctx),
+          `return (async () => {\n${source}\n})()`,
+        );
+        await run(...Object.values(ctx));
+      } catch (err) {
+        say('ERREUR', err.message);
+      }
+      document.title = 'DONE';
+    </script>
+  </body>
+</html>

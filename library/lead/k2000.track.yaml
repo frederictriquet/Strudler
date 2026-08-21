@@ -1,0 +1,5 @@
+name: k2000
+beats: 4
+key: 5A
+pattern: |-
+  n("[0 4 5 4]*4").scale("C:minor").sound("sawtooth").legato(0.5)

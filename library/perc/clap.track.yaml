@@ -1,0 +1,7 @@
+name: clap
+beats: 4
+pattern: |-
+  stack(
+    s("[- cp]*2"),
+    s("[[-  [- <- clap:3>]] clap]*2"),
+  )

@@ -12,6 +12,9 @@ import * as strudelMini from '@strudel/mini';
 // notes around. [SPEC-17.48]
 import * as strudelTonal from '@strudel/tonal';
 import * as strudelWebaudio from '@strudel/webaudio';
+// General MIDI instruments (`gm_*`), the ones the strudel.cc REPL plays. Their
+// presets are read from the LOCAL library, never from a CDN. [SPEC-17.55]
+import { registerSoundfonts, setSoundfontUrl } from '@strudel/soundfonts';
 import { transpiler } from '@strudel/transpiler';
 import { DEFAULT_BEATS_PER_CYCLE, type TimeSource } from '@core/clock/Clock';
 import { defaultEffects, type ChannelEffects } from '@core/channels/types';
@@ -23,13 +26,20 @@ import {
   COARSE_FACTORS,
 } from '@core/channels/fxParams';
 import { fullReloadOnHmr } from '@core/persist/hmr';
+import { quietly } from '@core/engine/evalNoise';
 
 // Owns the audio graph and the Strudel repl. [SPEC-17.31]
 fullReloadOnHmr(import.meta.hot);
 
 const { repl, evalScope, ref } = strudelCore;
-const { getAudioContext, webaudioOutput, registerSynthSounds, initAudioOnFirstClick, samples } =
-  strudelWebaudio;
+const {
+  getAudioContext,
+  webaudioOutput,
+  registerSynthSounds,
+  initAudioOnFirstClick,
+  samples,
+  soundMap,
+} = strudelWebaudio;
 
 // Re-exported by @strudel/webaudio from superdough, which ships no types. Reached
 // defensively: if it ever goes away, the drop still works through the per-event
@@ -52,6 +62,27 @@ const getSuperdoughAudioController = (
 export type EngineStatus = 'idle' | 'starting' | 'ready' | 'playing' | 'error';
 
 /**
+ * One note as it is actually played, handed over the moment the scheduler commits
+ * it — which is BEFORE it is audible. [SPEC-19]
+ *
+ * `orbit` is what identifies the channel: `voiceCode` gives every voice
+ * `.orbit(channel + 1)` for per-channel effect buses [SPEC-17.37], so the tag is
+ * already there and nothing has to be instrumented.
+ */
+export interface TriggerInfo {
+  /** Strudel orbit = channel + 1, or null for a voice without one. */
+  orbit: number | null;
+  /** Sound/sample name (`s`), when the event has one. */
+  sound: string | null;
+  note: string | number | null;
+  /** Gain as played, channel fader included. */
+  gain: number;
+  /** Attack time on the AudioContext clock (ahead of `currentTime`). */
+  audioTime: number;
+  cps: number;
+}
+
+/**
  * One event produced by a pattern, as returned by `queryEvents`. [SPEC-18.8]
  * Times are in CYCLES from the start of the query (1 cycle = 4 beats).
  */
@@ -66,6 +97,29 @@ export interface HapInfo {
   hasOnset: boolean;
   /** Control values (`s`, `n`, `note`, `gain`, …) as plain data. */
   value: Record<string, unknown>;
+  /**
+   * Character ranges in the EVALUATED source that produced this event. [SPEC-18.27]
+   *
+   * Strudel's transpiler tags every mini-notation atom with its offset, and those
+   * tags are concatenated as patterns combine. Absolute character offsets, not
+   * line/column. Two verified consequences, both faithful to the official REPL:
+   *   - it is a SET of contributing atoms in no guaranteed order, possibly across
+   *     several strings — in `note("c e").s("piano")` an event carries both `c`
+   *     and `piano`;
+   *   - operator arguments count — `bd*2` yields the ranges of `bd` AND of `2`.
+   * A non-mini pattern (`silence`, a numeric argument) yields none.
+   *
+   * Valid only against the exact string that was evaluated — a caller that
+   * rewrote the code before querying (variable expansion, layer filtering) must
+   * not map these onto what the user is looking at.
+   */
+  locations: SourceRange[];
+}
+
+/** A character range in the evaluated source. */
+export interface SourceRange {
+  start: number;
+  end: number;
 }
 
 type Repl = ReturnType<typeof repl>;
@@ -131,6 +185,10 @@ const ECHO_FEEDBACK = 0.55; // each repeat ~5 dB down: a few audible echoes
 const ECHO_WET = 0.8;
 const ECHO_SEND_RAMP_S = 0.02;
 const ECHO_MAX_DELAY_S = 12; // room for 4 beats even at very slow tempos
+/** Fade used to silence a ringing echo on STOP: long enough not to click, short
+ *  enough to read as «it stopped». */
+const ECHO_KILL_S = 0.08;
+
 function fxLpfHz(p: number): number {
   return LPF_MIN * Math.pow(LPF_MAX / LPF_MIN, Math.min(1, Math.max(0, p)));
 }
@@ -271,6 +329,65 @@ export class StrudelEngine implements TimeSource {
     }
   }
 
+  // --- Play observers ([SPEC-19]) ---
+  //
+  // Read-only taps on what is played, for the stage output. They must never be
+  // able to disturb the audio: the sound is triggered FIRST, observers are called
+  // after, and their exceptions are caught and republished (never swallowed
+  // [SPEC-14.3]).
+  private readonly triggerListeners = new Set<(info: TriggerInfo) => void>();
+  private readonly triggerErrorListeners = new Set<(error: Error) => void>();
+
+  /** Observe every played note. Returns an unsubscribe function. */
+  onTrigger(listener: (info: TriggerInfo) => void): () => void {
+    this.triggerListeners.add(listener);
+    return () => this.triggerListeners.delete(listener);
+  }
+
+  /** Observe failures thrown by trigger observers. */
+  onTriggerError(listener: (error: Error) => void): () => void {
+    this.triggerErrorListeners.add(listener);
+    return () => this.triggerErrorListeners.delete(listener);
+  }
+
+  private notifyTrigger(hap: unknown, audioTime: number, cps: number): void {
+    const value = ((hap as { value?: unknown } | null)?.value ?? {}) as Record<string, unknown>;
+    const orbit = typeof value.orbit === 'number' ? value.orbit : null;
+    const note = typeof value.note === 'string' || typeof value.note === 'number' ? value.note : null;
+    const info: TriggerInfo = {
+      orbit,
+      sound: typeof value.s === 'string' ? value.s : null,
+      note,
+      gain: typeof value.gain === 'number' ? value.gain : 1,
+      audioTime,
+      cps,
+    };
+    for (const listener of this.triggerListeners) {
+      try {
+        listener(info);
+      } catch (err) {
+        for (const onError of this.triggerErrorListeners) onError(err as Error);
+      }
+    }
+  }
+
+  /**
+   * Convert an AudioContext instant to epoch milliseconds, so another process can
+   * compare it to its own clock. `getOutputTimestamp()` gives the two clocks at the
+   * same moment; it is re-read every call because they drift apart. [SPEC-19]
+   */
+  audioTimeToEpochMs(audioTime: number): number {
+    const ctx = getAudioContext();
+    const stamp = ctx.getOutputTimestamp?.();
+    const contextTime =
+      stamp && Number.isFinite(stamp.contextTime) ? (stamp.contextTime as number) : ctx.currentTime;
+    const performanceTime =
+      stamp && Number.isFinite(stamp.performanceTime) && (stamp.performanceTime as number) > 0
+        ? (stamp.performanceTime as number)
+        : performance.now();
+    return performance.timeOrigin + performanceTime + (audioTime - contextTime) * 1000;
+  }
+
   /**
    * Wait for the audio context to be unlocked and the scope to be ready, then
    * build the REPL. Call from within a user gesture (awaits the armed unlock,
@@ -284,8 +401,31 @@ export class StrudelEngine implements TimeSource {
     if (this.repl) return;
 
     const ctx = getAudioContext();
+    // Wrapped output: Strudel calls it for every event it plays, which is the one
+    // place that knows both WHAT plays and WHEN it will be heard. The audio call
+    // comes first and its promise is returned untouched — observing must not delay
+    // or break playback. [SPEC-19]
+    const output = (hap: unknown, deadline: number, duration: number, cps: number, t: unknown) => {
+      const playing = (webaudioOutput as (...args: unknown[]) => unknown)(
+        hap,
+        deadline,
+        duration,
+        cps,
+        t,
+      );
+      if (this.triggerListeners.size > 0) {
+        // `deadline` is a RELATIVE delay (`targetTime - phase` in Cyclist), kept
+        // only for backwards compatibility; the ABSOLUTE attack time on the audio
+        // clock — latency included — is the 5th argument. Mistaking one for the
+        // other yields a target time that drifts by a whole beat per beat.
+        const audioTime =
+          typeof t === 'number' && Number.isFinite(t) ? t : ctx.currentTime + deadline;
+        this.notifyTrigger(hap, audioTime, cps);
+      }
+      return playing;
+    };
     this.repl = repl({
-      defaultOutput: webaudioOutput,
+      defaultOutput: output,
       getTime: () => ctx.currentTime,
       transpiler,
       // evaluate() swallows eval errors internally; capture them so play() can
@@ -332,14 +472,32 @@ export class StrudelEngine implements TimeSource {
     // makes those effects truly per-channel and lets a pattern sidechain a precise
     // channel with `.duck(n)`. Safe on a stereo output: orbits only map to separate
     // output pairs when `multiChannelOrbits` is enabled, which it is not. [SPEC-17.37]
-    let chain =
-      `${shifted}.orbit(${channel + 1})` +
-      `.lpf(fxcut(${channel})).lpq(fxq(${channel}))` +
-      `.hpf(fxhcut(${channel})).hpq(fxhq(${channel}))` +
-      `.delay(fxdmix(${channel})).delaytime(fxdtime()).delayfeedback(fxdfb(${channel}))` +
-      `.room(fxroom(${channel})).roomsize(fxsize(${channel}))` +
-      `.phaserrate(fxphrate(${channel})).phaserdepth(fxphdepth(${channel}))` +
-      `.djf(gdjf())`; // global filter gesture, bypassed at 0.5 [SPEC-17.41]
+    let chain = `${shifted}.orbit(${channel + 1})`;
+
+    // A control set LATER wins, so anything the chain appends REPLACES what the
+    // track wrote — a track's own `.lpf(800)` was silently becoming the channel's
+    // 20 kHz. These four are therefore inserted only when actually engaged; while
+    // they are off the track keeps its own sound, and touching the effect hands
+    // control back to the channel. [SPEC-17.53]
+    const filter = this.filterFor(channel);
+    if (fx.lpf.on || filter < NEUTRAL_FILTER) {
+      chain += `.lpf(fxcut(${channel})).lpq(fxq(${channel}))`;
+    }
+    if (fx.hpf.on || filter > NEUTRAL_FILTER) {
+      chain += `.hpf(fxhcut(${channel})).hpq(fxhq(${channel}))`;
+    }
+    if (fx.delay.on) {
+      chain += `.delay(fxdmix(${channel})).delaytime(fxdtime()).delayfeedback(fxdfb(${channel}))`;
+    }
+    if (fx.reverb.on) chain += `.room(fxroom(${channel})).roomsize(fxsize(${channel}))`;
+
+    // Phaser and djf stay UNCONDITIONAL: they back held gestures [SPEC-17.41,
+    // SPEC-17.46] that must bite on voices already playing, which a conditional
+    // insert could only achieve by re-evaluating mid-gesture. Their neutral is
+    // genuinely inert — depth 0 makes superdough build nothing, djf 0.5 bypasses —
+    // and `setGlobalFilter` needs the djf node to exist to reach it at all.
+    chain +=
+      `.phaserrate(fxphrate(${channel})).phaserdepth(fxphdepth(${channel}))` + `.djf(gdjf())`;
     if (fx.tremolo.on) {
       chain += `.tremolosync(fxtrsync(${channel})).tremolodepth(fxtrdepth(${channel}))`;
     }
@@ -347,7 +505,11 @@ export class StrudelEngine implements TimeSource {
     if (fx.drive.on) {
       chain += `.distort(fxdist(${channel})).shape(fxshape(${channel})).postgain(fxpost(${channel}))`;
     }
-    return `${chain}.gain(chgain(${channel}))`;
+    // MULTIPLIES the track's own gain instead of replacing it: the channel fader
+    // has to scale what the track declares [SPEC-4.2], not discard it. `mul` on a
+    // missing field yields the factor itself, so a track without `gain` still ends
+    // up at the channel level. [SPEC-17.53]
+    return `${chain}.mul(gain(chgain(${channel})))`;
   }
 
   /** Add/replace (code) or remove (null) a voice, then rebuild the stack. */
@@ -395,6 +557,7 @@ export class StrudelEngine implements TimeSource {
   stop(): void {
     this.running = false;
     this.voices.clear();
+    this.killEchoes();
     if (!this.repl) return;
     this.repl.scheduler.stop();
   }
@@ -412,6 +575,9 @@ export class StrudelEngine implements TimeSource {
   stopTransport(): void {
     this.running = false;
     this.repl?.scheduler.stop();
+    // Stopping the scheduler leaves the echo lines recirculating: they are audio
+    // nodes, not pattern events. [SPEC-17.47]
+    this.killEchoes();
   }
 
   get isTransportRunning(): boolean {
@@ -449,12 +615,22 @@ export class StrudelEngine implements TimeSource {
    * engine talks to Strudel ([PLAN F]).
    *
    * Throws on an eval/query error so the caller can report "code invalide".
+   *
+   * `quiet` marks the evaluation as SPECULATIVE: a caller that is probing which of
+   * several spellings Strudel accepts expects failures, and Strudel's broadcast of
+   * them must not reach the user as an error. [SPEC-18.30.9]
    */
-  async queryEvents(code: string, cycles: number): Promise<HapInfo[]> {
+  async queryEvents(
+    code: string,
+    cycles: number,
+    options: { quiet?: boolean } = {},
+  ): Promise<HapInfo[]> {
     await this.scopeReady;
     const r = this.ensureMeasureRepl();
     this.lastEvalError = null;
-    const evaluated = await r.evaluate(code, false); // autostart false → no scheduler, no sound
+    const evaluated = options.quiet
+      ? await quietly(() => r.evaluate(code, false))
+      : await r.evaluate(code, false); // autostart false → no scheduler, no sound
     if (this.lastEvalError) throw this.lastEvalError;
     const pattern = evaluated as { queryArc?: (b: number, e: number) => unknown[] } | undefined;
     if (!pattern || typeof pattern.queryArc !== 'function') {
@@ -466,6 +642,7 @@ export class StrudelEngine implements TimeSource {
       whole?: { begin: unknown; end: unknown };
       value: unknown;
       hasOnset?: () => boolean;
+      context?: { locations?: Array<{ start?: unknown; end?: unknown }> };
     };
     let haps: RawHap[];
     try {
@@ -489,6 +666,15 @@ export class StrudelEngine implements TimeSource {
         wholeEnd: Number(span.end),
         hasOnset: h.hasOnset ? h.hasOnset() : true,
         value,
+        // Defensive: the transpiler only tags mini-notation atoms, so a pattern
+        // built without any (or with locations stripped) simply has none.
+        locations: (h.context?.locations ?? []).flatMap((loc) => {
+          const start = Number(loc?.start);
+          const end = Number(loc?.end);
+          return Number.isFinite(start) && Number.isFinite(end) && end > start
+            ? [{ start, end }]
+            : [];
+        }),
       };
     });
   }
@@ -558,9 +744,46 @@ export class StrudelEngine implements TimeSource {
    * Needs the audio scope ready (call after init). Samples are fetched on first
    * use and cached in memory; the Service Worker caches the network for offline.
    */
-  async loadSamples(source: string): Promise<void> {
+  async loadSamples(source: string, base?: string): Promise<void> {
     await this.scopeReady;
-    await samples(source);
+    // `base` prefixes the relative paths of a remote map; omitted for the local
+    // bank, whose map already carries `_base`. [SPEC-17.54]
+    await (base === undefined ? samples(source) : samples(source, base));
+  }
+
+  /**
+   * Register the General MIDI instruments (`gm_*`) and read their presets from
+   * `baseUrl`. [SPEC-17.55]
+   *
+   * `@strudel/soundfonts` defaults to felixroos.github.io; pointing it at the
+   * local library is what makes a `gm_*` sound available on stage rather than
+   * "available if the network is". A cache is not availability: it holds what
+   * happened to be played before, for as long as the browser feels like it.
+   *
+   * Idempotent — `registerSound()` overwrites, so a second call is harmless.
+   */
+  async registerSoundfonts(baseUrl: string): Promise<void> {
+    await this.scopeReady;
+    setSoundfontUrl(baseUrl);
+    registerSoundfonts();
+  }
+
+  /**
+   * Every sound name `s("…")` can currently resolve — samples, synths and
+   * soundfonts alike. [SPEC-17.56]
+   *
+   * Superdough answers an unknown name with silence, which is indistinguishable
+   * from a pattern that plays nothing. Exposing the registry lets a caller say
+   * «this name does not exist» before the user hunts through their code.
+   */
+  registeredSounds(): string[] {
+    try {
+      return Object.keys(soundMap.get());
+    } catch (err) {
+      // Reading the registry must never break a query; report and claim nothing.
+      console.warn('[engine] registre des sons illisible:', err);
+      return [];
+    }
   }
 
   // --- Channel volume ([SPEC-3.3], full Channels model in phase 3) ---
@@ -722,9 +945,14 @@ export class StrudelEngine implements TimeSource {
   // is the whole point of an echo, and why this gesture does not stop dead like
   // the others.
 
-  private readonly echoes = new Map<number, { send: GainNode; delay: DelayNode }>();
+  private readonly echoes = new Map<
+    number,
+    { send: GainNode; delay: DelayNode; feedback: GainNode; wet: GainNode }
+  >();
 
-  private ensureEcho(beats: number): { send: GainNode; delay: DelayNode } | null {
+  private ensureEcho(
+    beats: number,
+  ): { send: GainNode; delay: DelayNode; feedback: GainNode; wet: GainNode } | null {
     const existing = this.echoes.get(beats);
     if (existing) return existing;
     const insert = this.ensureMasterInsert();
@@ -743,7 +971,7 @@ export class StrudelEngine implements TimeSource {
     delay.connect(feedback).connect(delay); // repeats, decaying
     delay.connect(wet).connect(insert.out);
 
-    const echo = { send, delay };
+    const echo = { send, delay, feedback, wet };
     this.echoes.set(beats, echo);
     return echo;
   }
@@ -757,10 +985,41 @@ export class StrudelEngine implements TimeSource {
     const echo = this.ensureEcho(beats);
     if (!echo) return;
     const now = getAudioContext().currentTime;
-    if (on) echo.delay.delayTime.setValueAtTime(this.echoSeconds(beats), now); // follow tempo
+    if (on) {
+      echo.delay.delayTime.setValueAtTime(this.echoSeconds(beats), now); // follow tempo
+      // The line may have been silenced by a STOP [SPEC-17.47]; revive it here,
+      // at the moment it is wanted again, rather than on a timer after the kill.
+      echo.feedback.gain.setValueAtTime(ECHO_FEEDBACK, now);
+      echo.wet.gain.setValueAtTime(ECHO_WET, now);
+    }
     echo.send.gain.cancelScheduledValues(now);
     echo.send.gain.setValueAtTime(echo.send.gain.value, now);
     echo.send.gain.linearRampToValueAtTime(on ? 1 : 0, now + ECHO_SEND_RAMP_S);
+  }
+
+  /**
+   * Silence every echo line at once. [SPEC-17.47]
+   *
+   * Releasing the key only closes the SEND — the delay keeps recirculating what it
+   * already holds, which is the point of an echo. On STOP that becomes a bug: the
+   * transport is off and sound keeps coming. Closing the send is not enough, and
+   * neither is cutting the feedback: the delay buffer still empties for up to one
+   * delay time (2 s at 120 BPM for a 4-beat echo). The RETURN has to go too.
+   *
+   * A short ramp rather than a hard zero, otherwise the cut clicks. The nominal
+   * gains are not restored on a timer — `setEcho(…, true)` does it when the effect
+   * is next engaged, so a stopped workshop stays silent for good.
+   */
+  killEchoes(): void {
+    if (this.echoes.size === 0) return;
+    const now = getAudioContext().currentTime;
+    for (const echo of this.echoes.values()) {
+      for (const gain of [echo.send.gain, echo.feedback.gain, echo.wet.gain]) {
+        gain.cancelScheduledValues(now);
+        gain.setValueAtTime(gain.value, now);
+        gain.linearRampToValueAtTime(0, now + ECHO_KILL_S);
+      }
+    }
   }
 
 

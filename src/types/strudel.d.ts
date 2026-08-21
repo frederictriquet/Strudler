@@ -48,6 +48,26 @@ declare module '@strudel/webaudio' {
     baseUrl?: string,
     options?: unknown,
   ): Promise<void>;
+  /** superdough's registry, re-exported: sound name → handler + metadata. The one
+   *  authority on what `s("…")` can resolve, so a name can be checked BEFORE it
+   *  fails silently at play time. [SPEC-17.56] */
+  export const soundMap: {
+    get(): Record<string, { data?: { type?: string; fonts?: string[] } }>;
+  };
+}
+
+declare module '@strudel/soundfonts' {
+  /** Register the 125 General MIDI instruments as `gm_*` sounds. [SPEC-17.55] */
+  export function registerSoundfonts(): void;
+  /** Base URL the presets are fetched from. Repointed at the local copy so a set
+   *  never depends on a CDN. */
+  export function setSoundfontUrl(url: string): void;
+}
+
+declare module '@strudel/soundfonts/gm.mjs' {
+  /** Instrument name → ordered preset variants, the list `n()` indexes into. */
+  const gm: Record<string, string[]>;
+  export default gm;
 }
 
 declare module '@strudel/tonal' {

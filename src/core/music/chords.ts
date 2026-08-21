@@ -114,3 +114,19 @@ export function buildProgression(
 export function progressionPattern(chords: Chord[]): string {
   return `<${chords.map((c) => c.symbol).join(' ')}>`;
 }
+
+/** Name a pitch class, in the spelling the user chose. Enharmonics are the same
+ *  note for Strudel; this only changes what is read. */
+export function noteNameFor(pc: number, spelling: 'sharp' | 'flat' = 'sharp'): string {
+  const names = spelling === 'flat' ? FLAT_NAMES : SHARP_NAMES;
+  return names[(((pc % 12) + 12) % 12)];
+}
+
+/** Semitones above the tonic for scale step `n` (1-based), octaves included:
+ *  step 8 is the tonic an octave up, step 10 a tenth. Returns null past step 14. */
+export function scaleStepSemitones(step: number, mode: KeyMode): number | null {
+  if (!Number.isInteger(step) || step < 1 || step > 14) return null;
+  const index = (step - 1) % 7;
+  const octave = Math.floor((step - 1) / 7);
+  return DEGREE_SEMITONES[mode][index] + 12 * octave;
+}

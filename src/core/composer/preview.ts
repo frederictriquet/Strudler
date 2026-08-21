@@ -17,7 +17,8 @@
 // way it will play [SPEC-18.5].
 
 import { engine } from '@core/engine/StrudelEngine';
-import { SOUND_MAP_URL, type SoundEntry } from '@core/composer/sounds';
+import { soundKey, type SoundEntry } from '@core/composer/sounds';
+import { loadAllBanks } from '@core/engine/sampleBanks';
 
 const PREVIEW_CHANNEL = 0;
 /** Slot reserved for auditions — never 0, which carries the loop being written. */
@@ -50,11 +51,12 @@ let startedByPreview = false;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** What is actually played: a single hit, on a real note for pitched instruments. */
-function previewCode(entry: SoundEntry): string {
+/** What is actually played: a single hit, on a real note for pitched instruments,
+ *  on the requested variant for indexed ones. [SPEC-18.29] */
+function previewCode(entry: SoundEntry, index?: number): string {
   return entry.kind === 'pitched'
     ? `note("${PREVIEW_NOTE}").s("${entry.name}")`
-    : `s("${entry.name}")`;
+    : `s("${soundKey(entry.name, index)}")`;
 }
 
 /** Shift the pattern so its onset lands just ahead of the scheduler's read head. */
@@ -77,12 +79,17 @@ async function ensureAudio(): Promise<void> {
     );
   }
   if (!samplesLoaded) {
-    samplesLoaded = engine.loadSamples(SOUND_MAP_URL).catch((err: Error) => {
-      samplesLoaded = null; // a failed load must not poison every later audition
-      throw new Error(
-        `Banque de sons non chargée (${err.message}) — sans elle les échantillons restent muets.`,
-      );
-    });
+    samplesLoaded = loadAllBanks(engine)
+      .then((result) => {
+        if (result.loaded.length === 0) {
+          samplesLoaded = null; // a failed load must not poison every later audition
+          throw new Error('Aucune banque de sons chargée — les échantillons restent muets.');
+        }
+      })
+      .catch((err: Error) => {
+        samplesLoaded = null;
+        throw err;
+      });
   }
   await samplesLoaded;
 }
@@ -98,16 +105,6 @@ async function release(): Promise<void> {
   }
 }
 
-/**
- * Play one hit of `entry` and clean up after itself. Resolves once the audition
- * is over (≈0.65 s), so the caller can light the sound while it sounds.
- *
- * `bpm` is the workshop's audition tempo [SPEC-18.12]; it is only used to convert
- * the lead time into cycles — the engine's tempo is never changed here, so a loop
- * playing in slot 0 keeps its own tempo and is not interrupted.
- *
- * Throws when audio cannot be unlocked or the bank cannot be loaded.
- */
 /**
  * Loop a fragment on its own until {@link stopIsolate}. [SPEC-18.13]
  *
@@ -132,7 +129,19 @@ export async function stopIsolate(): Promise<void> {
   await release();
 }
 
-export async function previewSound(entry: SoundEntry, bpm: number): Promise<void> {
+/**
+ * Play ONE hit of an arbitrary pattern and clean up after itself. Resolves once
+ * the audition is over (≈0.65 s), so the caller can light what is sounding.
+ *
+ * `bpm` is the workshop's audition tempo [SPEC-18.12]; it only converts the lead
+ * time into cycles — the engine's tempo is never changed here, so a loop playing
+ * in slot 0 keeps its own tempo and is not interrupted.
+ *
+ * MUST be reached synchronously from a click: `ensureAudio` resumes the
+ * AudioContext, which browsers only grant inside a user gesture [SPEC-17.50].
+ * Throws when audio cannot be unlocked or the bank cannot be loaded.
+ */
+export async function previewPattern(pattern: string, bpm: number): Promise<void> {
   await ensureAudio();
 
   const token = ++currentToken;
@@ -141,7 +150,7 @@ export async function previewSound(entry: SoundEntry, bpm: number): Promise<void
   // Transport stopped: starting it rewinds the scheduler to cycle 0, so the plain
   // pattern already fires at once. Transport running: the onset has to be placed
   // ahead of what the scheduler has queried, hence the nudge.
-  const code = wasRunning ? nudged(previewCode(entry), cps) : previewCode(entry);
+  const code = wasRunning ? nudged(pattern, cps) : pattern;
 
   await engine.setVoice(PREVIEW_CHANNEL, PREVIEW_SLOT, code);
   if (token !== currentToken) return; // superseded: the newer audition owns the slot
@@ -153,4 +162,9 @@ export async function previewSound(entry: SoundEntry, bpm: number): Promise<void
   await sleep(((wasRunning ? LEAD_S : 0) + HOLD_S) * 1000);
   if (token !== currentToken) return; // a newer audition will release the slot
   await release();
+}
+
+/** Play one hit of `entry`. See {@link previewPattern}. */
+export async function previewSound(entry: SoundEntry, bpm: number, index?: number): Promise<void> {
+  await previewPattern(previewCode(entry, index), bpm);
 }

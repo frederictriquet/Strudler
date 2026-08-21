@@ -9,6 +9,8 @@
 //   - a map keyed by note name   → pitched instrument, written `note("c3").s("piano")`
 // The distinction matters when writing the pattern, so it is surfaced. [SPEC-17.18]
 
+import { LOCAL_BANK_URL, REPL_BANKS } from '@core/engine/sampleBanks';
+
 export type SoundKind = 'indexed' | 'pitched';
 
 export interface SoundEntry {
@@ -19,38 +21,80 @@ export interface SoundEntry {
 }
 
 /** Same URL the instrument loads. [SPEC-12.1] */
-export const SOUND_MAP_URL = '/sounds/strudel.json';
+export const SOUND_MAP_URL = LOCAL_BANK_URL;
 
-/** Fetch and flatten the bank. Throws with a usable message on failure. */
-export async function fetchSounds(url = SOUND_MAP_URL): Promise<SoundEntry[]> {
-  let raw: unknown;
-  try {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    raw = await response.json();
-  } catch (err) {
-    throw new Error(
-      `Banque de sons illisible (${(err as Error).message}). Lancez « npm run dev » et vérifiez ~/Music/Sounds.`,
-    );
-  }
-  if (!raw || typeof raw !== 'object') throw new Error('Banque de sons vide ou malformée.');
-
-  const entries: SoundEntry[] = [];
+/** Read one map into entries. Metadata keys (`_base`) are not sounds. */
+function collect(raw: unknown, into: Map<string, SoundEntry>): void {
+  if (!raw || typeof raw !== 'object') return;
   for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (name.startsWith('_')) continue; // `_base` and friends are metadata, not sounds
-    if (Array.isArray(value)) {
-      entries.push({ name, kind: 'indexed', count: value.length });
-    } else if (value && typeof value === 'object') {
-      entries.push({ name, kind: 'pitched', count: Object.keys(value).length });
+    if (name.startsWith('_')) continue;
+    if (Array.isArray(value)) into.set(name, { name, kind: 'indexed', count: value.length });
+    else if (value && typeof value === 'object') {
+      into.set(name, { name, kind: 'pitched', count: Object.keys(value).length });
     }
   }
-  entries.sort((a, b) => a.name.localeCompare(b.name));
-  return entries;
 }
 
-/** The snippet to insert for a sound — pitched instruments need a `note()`. */
-export function soundSnippet(entry: SoundEntry): string {
-  return entry.kind === 'pitched'
-    ? `note("c3 e3 g3").s("${entry.name}")`
-    : `s("${entry.name}*4")`;
+/**
+ * Every sound actually registered, from every bank. [SPEC-17.54]
+ *
+ * Walked in the SAME order as `loadAllBanks`, and a later bank overwrites an
+ * earlier entry of the same name — mirroring `registerSound`, so the browser
+ * reports the file count that will really be heard rather than the one the local
+ * folder happens to hold.
+ *
+ * A bank that cannot be read is skipped rather than fatal: the workshop stays
+ * usable with what did load. Only a completely empty result throws.
+ */
+export async function fetchSounds(): Promise<SoundEntry[]> {
+  const found = new Map<string, SoundEntry>();
+  const banks = [{ label: 'banque locale', url: LOCAL_BANK_URL }, ...REPL_BANKS];
+  for (const bank of banks) {
+    try {
+      const response = await fetch(bank.url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      collect(await response.json(), found);
+    } catch {
+      // Reported by the loader itself [SPEC-17.54]; listing must not fail twice.
+    }
+  }
+  if (found.size === 0) {
+    throw new Error(
+      'Aucune banque de sons lisible. Lancez « npm run dev » et vérifiez ~/Music/Sounds.',
+    );
+  }
+  return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Identity of a sound or of one of its variants. [SPEC-18.29]
+ *
+ * `hh` or `hh:4` — the very syntax Strudel uses, so a bookmark reads like the code
+ * it will produce and no separate encoding has to be learnt or migrated.
+ */
+export function soundKey(name: string, index?: number): string {
+  return index === undefined ? name : `${name}:${index}`;
+}
+
+/** Sound name of a key, variant dropped. `hh:4` → `hh`. */
+export function soundNameOf(key: string): string {
+  const colon = key.lastIndexOf(':');
+  return colon === -1 ? key : key.slice(0, colon);
+}
+
+/** True when `key` designates this sound, either bare or one of its variants. */
+export function keyBelongsTo(key: string, name: string): boolean {
+  return key === name || key.startsWith(`${name}:`);
+}
+
+/** The snippet to insert. `index` targets one variant of an indexed sound;
+ *  pitched instruments are addressed by note, so they ignore it. */
+export function soundSnippet(entry: SoundEntry, index?: number): string {
+  if (entry.kind === 'pitched') return `note("c3 e3 g3").s("${entry.name}")`;
+  return `s("${soundKey(entry.name, index)}*4")`;
+}
+
+/** The bare name to drop at the caret, variant included when there is one. */
+export function soundInsertName(entry: SoundEntry, index?: number): string {
+  return entry.kind === 'pitched' ? entry.name : soundKey(entry.name, index);
 }

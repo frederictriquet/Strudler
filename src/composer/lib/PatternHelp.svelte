@@ -2,20 +2,14 @@
   // [SPEC-18.13] Contextual help: what is under the caret, and what to isolate.
   //
   // Read-only on the pattern — it never rewrites the text, in line with the
-  // one-way rule the assistants follow [SPEC-18.7]. All wording comes from
-  // `@core/composer/miniNotation`, so the cheat sheet and the caret explanation
-  // can never say two different things about the same operator.
+  // one-way rule the assistants follow [SPEC-18.7]. Wording comes from
+  // `@core/composer/miniNotation`, shared with the cheat sheet
+  // (`MiniNotationSheet.svelte`, right-hand column) so the two can never disagree.
   //
   // The panel keeps a fixed height and shows a placeholder rather than
   // disappearing: an explanation that pops in and out on every keystroke is read
   // as a glitch and gets ignored.
-  import {
-    explainAt,
-    fragmentAround,
-    FUNCTIONS,
-    MINI_NOTATION,
-    type SyntaxEntry,
-  } from '@core/composer/miniNotation';
+  import { codeSegments, explainAt, fragmentAround } from '@core/composer/miniNotation';
 
   interface Props {
     text: string;
@@ -30,15 +24,6 @@
   const explanation = $derived(explainAt(text, caret));
   const fragment = $derived(fragmentAround(text, selectionStart, selectionEnd));
 
-  /** Backticks in the tables mark code: render them as such instead of showing
-   *  the character. Split, never inject HTML. */
-  function segments(source: string): Array<{ code: boolean; value: string }> {
-    return source
-      .split('`')
-      .map((value, i) => ({ code: i % 2 === 1, value }))
-      .filter((s) => s.value !== '');
-  }
-
   function preview(source: string): string {
     const flat = source.replace(/\s+/g, ' ').trim();
     return flat.length > 46 ? `${flat.slice(0, 45)}…` : flat;
@@ -49,11 +34,6 @@
     layer: 'la couche',
     expression: 'tout le pattern',
   };
-
-  const sheet: Array<{ title: string; entries: SyntaxEntry[] }> = [
-    { title: 'Mini-notation (dans les guillemets)', entries: MINI_NOTATION },
-    { title: 'Fonctions', entries: FUNCTIONS },
-  ];
 </script>
 
 <div class="help">
@@ -62,7 +42,7 @@
       <span class="label">{explanation.label}</span>
       <code class="token">{explanation.token}</code>
       <p class="text">
-        {#each segments(explanation.text) as seg, i (i)}
+        {#each codeSegments(explanation.text) as seg, i (i)}
           {#if seg.code}<code>{seg.value}</code>{:else}{seg.value}{/if}
         {/each}
         {#if explanation.detail}
@@ -94,23 +74,6 @@
     </p>
   {/if}
 
-  <details>
-    <summary>Aide-mémoire de la mini-notation</summary>
-    {#each sheet as block (block.title)}
-      <h4>{block.title}</h4>
-      <dl>
-        {#each block.entries as entry (entry.token)}
-          <dt><code>{entry.token}</code></dt>
-          <dd>
-            <span class="label">{entry.label}</span>
-            {#each segments(entry.text) as seg, i (i)}
-              {#if seg.code}<code>{seg.value}</code>{:else}{seg.value}{/if}
-            {/each}
-          </dd>
-        {/each}
-      </dl>
-    {/each}
-  </details>
 </div>
 
 <style>
@@ -196,45 +159,8 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  summary {
-    cursor: pointer;
-    user-select: none;
-    padding: 0 0.2rem;
-  }
-  summary:hover {
-    color: var(--accent);
-  }
-  h4 {
-    margin: 0.5rem 0 0.25rem;
-    font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--accent-dim);
-  }
-  dl {
-    display: grid;
-    grid-template-columns: max-content minmax(0, 1fr);
-    gap: 0.22rem 0.6rem;
-    margin: 0;
-    max-height: 16rem;
-    overflow-y: auto;
-  }
-  dt {
-    color: var(--accent);
-  }
-  dd {
-    margin: 0;
-    line-height: 1.4;
-    color: var(--text);
-  }
-  dd .label {
-    margin-right: 0.3rem;
-  }
   code {
     font-family: ui-monospace, 'SF Mono', monospace;
     font-size: 0.92em;
-  }
-  dd code {
-    color: var(--muted);
   }
 </style>

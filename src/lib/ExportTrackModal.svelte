@@ -26,6 +26,7 @@
     measuredBeats,
     patternError,
     pickExportFolder,
+    exportFolderWarning,
     refreshTargetExists,
     saveTrackExport,
     targetId,
@@ -36,6 +37,7 @@
   const error = exportError;
   const status = exportStatus;
   const folder = exportFolder;
+  const folderWarning = exportFolderWarning;
   const yaml = exportYaml;
   const id = targetId;
   const measured = measuredBeats;
@@ -143,19 +145,32 @@
       </details>
 
       <div class="folder">
-        <button onclick={() => void pickExportFolder()} disabled={!canWriteToDisk}>
-          📁 Dossier…
+        <button
+          onclick={() => void pickExportFolder()}
+          disabled={!canWriteToDisk}
+          title={$folder
+            ? `Dossier actuel : ${$folder}. Cliquez pour en choisir un autre.`
+            : 'Choisir le dossier « library »'}
+        >
+          📁 {$folder ? 'Changer de dossier…' : 'Choisir le dossier library…'}
         </button>
         <span class="unit">
           {#if !canWriteToDisk}
             Écriture directe indisponible (Chrome ou Edge requis) — utilise le téléchargement.
           {:else if $folder}
-            Dossier autorisé : <strong>{$folder}</strong>
+            Dossier : <strong>{$folder}</strong>
           {:else}
-            Aucun dossier autorisé — choisis le dossier <code>library/</code> du projet.
+            Aucun dossier — choisis le dossier <code>library/</code> du projet, celui qui contient
+            les dossiers de catégories.
           {/if}
         </span>
       </div>
+
+      <!-- The picker gives no context, so the wrong level is easy to choose and
+           invisible afterwards. [SPEC-18.15] -->
+      {#if $folderWarning}
+        <p class="warning">⚠ {$folderWarning}</p>
+      {/if}
 
       {#each $check.blocking as message (message)}
         <p class="blocking">✕ {message}</p>

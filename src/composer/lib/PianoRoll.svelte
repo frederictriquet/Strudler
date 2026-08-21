@@ -3,9 +3,10 @@
   // obtained by querying it — never reconstructed from a parallel model, so the
   // view cannot disagree with what will be heard. [SPEC-18.6]
   //
-  // Two loop turns are drawn, with the repeat marked, so the loop length is a
-  // visible fact rather than something to be guessed.
-  import { LAYER_COLORS, type Roll } from '@core/composer/roll';
+  // Exactly ONE turn of the loop is drawn [SPEC-18.26]: the whole width is the
+  // declared length, and the playhead sweeping it is what makes the repeat
+  // perceptible [SPEC-18.27].
+  import { eventPhase, LAYER_COLORS, phaseWithin, type Roll } from '@core/composer/roll';
 
   interface Props {
     roll: Roll | null;
@@ -15,8 +16,14 @@
     periodBeats: number | null;
     /** Stale-marking: the roll shown no longer matches the text being typed. */
     stale?: boolean;
+    /** Absolute playback position in beats, or null when stopped. [SPEC-18.27] */
+    playheadBeat?: number | null;
   }
-  let { roll, phraseBeats, periodBeats, stale = false }: Props = $props();
+  let { roll, phraseBeats, periodBeats, stale = false, playheadBeat = null }: Props = $props();
+
+  /** Position inside the declared phrase, which is the whole drawn width: the view
+   *  spans exactly one turn, so the cursor sweeps it and wraps. [SPEC-18.26] */
+  const phase = $derived(phaseWithin(playheadBeat, phraseBeats));
 
   const ROW_HEIGHT = 18;
   const LABEL_WIDTH = 62;
@@ -30,13 +37,10 @@
   const gridBeats = $derived(
     spanBeats > 0 ? Array.from({ length: Math.floor(spanBeats) + 1 }, (_, i) => i) : [],
   );
-  /** Beat numbers, restarting at each declared phrase so the phrase is readable.
-   *  Thinned out when the span is long, to stay legible. */
+  /** Beat numbers, 1..N over the phrase. Thinned out when long, to stay legible. */
   const step = $derived(spanBeats > 32 ? 4 : 1);
   const ruler = $derived(
-    gridBeats
-      .filter((b) => b < spanBeats && b % step === 0)
-      .map((b) => ({ beat: b, label: phraseBeats > 0 ? (b % phraseBeats) + 1 : b + 1 })),
+    gridBeats.filter((b) => b < spanBeats && b % step === 0).map((b) => ({ beat: b, label: b + 1 })),
   );
   const rowIndex = $derived(new Map((roll?.rows ?? []).map((r, i) => [r.key, i])));
 </script>
@@ -45,16 +49,12 @@
   {#if !roll || roll.rows.length === 0}
     <p class="empty">Aucun événement — le pattern est silencieux ou vide.</p>
   {:else}
-    <!-- Beat ruler: numbers restart at every phrase, so «beat 3 of the phrase» is
-         readable straight off the drawing. -->
+    <!-- Beat ruler. The drawn width IS one turn of the loop [SPEC-18.26], so the
+         numbers simply run 1..N and the right edge is where it starts over. -->
     <div class="ruler" style="height:14px">
       <div class="lanes" style="left:{LABEL_WIDTH}px">
         {#each ruler as r (r.beat)}
-          <span
-            class="tick"
-            class:first={phraseBeats > 0 && r.beat % phraseBeats === 0}
-            style="left:{pct(r.beat)}%">{r.label}</span
-          >
+          <span class="tick" class:first={r.beat === 0} style="left:{pct(r.beat)}%">{r.label}</span>
         {/each}
       </div>
     </div>
@@ -70,14 +70,15 @@
         <div class="label" style="top:{i * ROW_HEIGHT}px; height:{ROW_HEIGHT}px">{row.label}</div>
       {/each}
 
-      <!-- Bar lines, and the loop boundary if a period was found -->
+      <!-- Bar lines and internal repeats. No loop boundary to draw: the view spans
+           exactly one turn, so the right edge is it. [SPEC-18.26] -->
       <div class="lanes" style="left:{LABEL_WIDTH}px">
         {#each gridBeats as b (b)}
           <div class="bar" class:downbeat={b % 4 === 0} style="left:{pct(b)}%"></div>
         {/each}
-        <!-- Where the declared phrase turns over. -->
-        {#if phraseBeats > 0 && phraseBeats < spanBeats}
-          <div class="loopmark" style="left:{pct(phraseBeats)}%"></div>
+        <!-- Playback cursor, above everything so it stays readable on a busy row. -->
+        {#if phase !== null}
+          <div class="playhead" style="left:{pct(phase)}%"></div>
         {/if}
         <!-- Every repeat of the measured period, when the content actually
              repeats sooner than the declared phrase — that gap is exactly what
@@ -94,14 +95,21 @@
           {@const left = pct(ev.begin)}
           {@const width = Math.max(0.6, pct(ev.end - ev.begin))}
           {@const color = LAYER_COLORS[ev.layer % LAYER_COLORS.length]}
+          {@const state = eventPhase(ev, phase)}
+          <!-- The width is the event's real duration, minus a hairline so adjacent
+               events stay countable: a `bd*4` lasts a full beat each, and drawn
+               edge to edge four kicks read as one drone. The bright left edge is
+               the ATTACK, which is what you look for on a percussion row. -->
           <div
             class="ev"
             class:tail={!ev.hasOnset}
-            style="left:{left}%; width:{width}%; top:{(rowIndex.get(ev.rowKey) ?? 0) *
+            class:attack={state === 'attack'}
+            class:held={state === 'held'}
+            style="left:{left}%; width:calc({width}% - 2px); top:{(rowIndex.get(ev.rowKey) ?? 0) *
               ROW_HEIGHT +
               3}px; height:{ROW_HEIGHT - 6}px; opacity:{0.35 +
               ev.gain * 0.65}; --ev-color:{color}"
-            title="{ev.label} — beat {ev.begin.toFixed(2)}"
+            title="{ev.label} — beat {(ev.begin % phraseBeats) + 1} de la phrase"
           ></div>
         {/each}
       </div>
@@ -111,6 +119,10 @@
 
 <style>
   .roll {
+    /* Never squeezed: inside a height-constrained column the roll is a flex item
+       and would shrink below its rows, hiding them behind its own scrollbar. The
+       column scrolls instead. */
+    flex: none;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--panel);
@@ -156,11 +168,16 @@
     overflow: hidden;
     white-space: nowrap;
   }
+  /* Clips what the playhead sticks out. It is 2 px wide at `left: <phase>%`, so
+     near the end of the loop it reached past the right edge — enough to raise a
+     horizontal scrollbar, whose 15 px then squeezed the rows and raised a vertical
+     one too. Both bars appeared only during playback, for that reason. */
   .lanes {
     position: absolute;
     top: 0;
     right: 0;
     bottom: 0;
+    overflow: hidden;
   }
   .ruler {
     position: relative;
@@ -190,15 +207,6 @@
   .bar.downbeat {
     background: rgba(255, 255, 255, 0.16);
   }
-  /* Where the declared phrase starts over — the loop length, made visible. */
-  .loopmark {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 2px;
-    background: var(--accent);
-    box-shadow: 0 0 6px rgba(110, 231, 183, 0.5);
-  }
   /* Internal repeat: the content already came back before the phrase ended. */
   .periodmark {
     position: absolute;
@@ -214,12 +222,46 @@
   /* Colour = the stack() layer that produced the event. [SPEC-18.9] */
   .ev {
     position: absolute;
-    border-radius: 3px;
+    min-width: 2px;
+    border-radius: 2px;
     background: var(--ev-color, var(--accent));
+    /* The attack edge: what makes four contiguous kicks look like four kicks
+       rather than one sustained block. [SPEC-18.25] */
+    box-shadow: inset 2px 0 0 rgba(255, 255, 255, 0.75);
   }
-  /* Fragment whose attack happened earlier: drawn hollow, not as a new hit. */
+  /* Fragment whose attack happened earlier: drawn hollow, and with no attack
+     edge — it is the tail of a note that started before this point. */
   .ev.tail {
     background: transparent;
     border: 1px solid var(--ev-color, var(--accent-dim));
+    box-shadow: none;
+  }
+  /* Sounding now. [SPEC-18.27] Styled by class rather than recomputed inline, so a
+     60 Hz playhead only toggles classes instead of rewriting style strings.
+     `attack` = the bright hit, `held` = the softer remainder of its duration. */
+  .ev.attack {
+    background: #ffffff;
+    box-shadow:
+      inset 2px 0 0 rgba(255, 255, 255, 0.9),
+      0 0 8px 2px var(--ev-color, var(--accent));
+  }
+  .ev.held {
+    filter: brightness(1.45);
+    box-shadow:
+      inset 2px 0 0 rgba(255, 255, 255, 0.9),
+      0 0 4px var(--ev-color, var(--accent));
+  }
+  /* Playback cursor. */
+  .playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    /* Centred on the position rather than starting at it. */
+    transform: translateX(-1px);
+    z-index: 2;
+    background: #fff;
+    box-shadow: 0 0 6px rgba(255, 255, 255, 0.7);
+    pointer-events: none;
   }
 </style>

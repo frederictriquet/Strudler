@@ -7,9 +7,26 @@
 // and WebHID [SPEC-14.1]. Everything here reports failures rather than swallowing
 // them [SPEC-14.3]; the caller decides what to show.
 
+import { saveJson } from '@core/persist/storage';
+
 const DB_NAME = 'strudler-composer';
 const STORE = 'handles';
 const KEY = 'libraryFolder';
+
+/** [SPEC-13.5] The handle itself cannot leave IndexedDB, but its NAME can. Kept in
+ *  localStorage so the state backup carries it: after restoring on another
+ *  machine or profile, the UI can say which folder to re-authorize instead of
+ *  letting the user discover it when a save fails. */
+export const FOLDER_NAME_KEY = 'composer:libraryFolderName';
+
+function rememberName(name: string): void {
+  try {
+    saveJson(FOLDER_NAME_KEY, name);
+  } catch (err) {
+    // A hint that could not be stored must never block choosing a folder.
+    console.warn('[libraryFolder] nom du dossier non mémorisé:', err);
+  }
+}
 
 /** True when the browser can write to a chosen folder at all. */
 export function isSupported(): boolean {
@@ -74,6 +91,7 @@ export async function restoreFolder(): Promise<string | null> {
       return null;
     }
     handle = stored;
+    rememberName(stored.name);
     return stored.name;
   } catch {
     return null; // no stored folder is a normal state, not an error
@@ -84,22 +102,66 @@ export async function restoreFolder(): Promise<string | null> {
  * Choose (or re-authorize) the library folder. MUST be called from a user
  * gesture. Returns the folder name.
  */
-export async function chooseFolder(): Promise<string> {
+export async function chooseFolder(): Promise<FolderChoice> {
   if (!isSupported()) {
     throw new Error(
       "Ce navigateur ne permet pas d'écrire dans un dossier (Chrome ou Edge requis).",
     );
   }
-  // A handle kept from a previous session only needs its permission renewed.
-  if (handle && (await ensurePermission(handle, true))) return handle.name;
-
+  // ALWAYS open the picker. It used to short-circuit on a stored handle whose
+  // permission was still granted, which made the button a no-op and left no way
+  // to correct a wrong folder — the one thing a user needs it for.
   const picked = await window.showDirectoryPicker!({ id: 'strudler-library', mode: 'readwrite' });
   if (!(await ensurePermission(picked, true))) {
     throw new Error('Accès au dossier refusé.');
   }
   handle = picked;
-  await idbPut(picked).catch(() => undefined); // persistence is a convenience, not a requirement
-  return picked.name;
+  rememberName(picked.name);
+  await idbPut(picked).catch((err) => console.warn('[libraryFolder] handle non persisté:', err));
+  return { name: picked.name, problem: await inspectFolder(picked) };
+}
+
+/** Renew a lapsed permission on the folder already chosen, without re-picking. */
+export async function renewPermission(): Promise<boolean> {
+  return handle ? ensurePermission(handle, true) : false;
+}
+
+export interface FolderChoice {
+  name: string;
+  /** Why the folder looks wrong, or null. Advisory: the user may legitimately
+   *  keep tracks somewhere else. */
+  problem: string | null;
+}
+
+/**
+ * Sanity-check the chosen folder. [SPEC-18.15]
+ *
+ * The picker gives no context, and picking `library/perc` instead of `library/`
+ * is an easy mistake — the app would then write `perc/<category>/…`, quietly
+ * creating a folder inside a folder. Two signals, both cheap:
+ *   - `track.schema.json` sits at the library root → certainly right;
+ *   - `.track.yaml` files sitting DIRECTLY here → this is a category folder,
+ *     i.e. one level too deep, which is exactly the mistake to catch.
+ * Anything else earns a soft doubt rather than a refusal: a user-owned track
+ * folder is a legitimate target.
+ */
+async function inspectFolder(dir: FileSystemDirectoryHandle): Promise<string | null> {
+  try {
+    await dir.getFileHandle('track.schema.json', { create: false });
+    return null; // the library root, no doubt possible
+  } catch {
+    // absent — keep looking
+  }
+  try {
+    for await (const entry of dir.values()) {
+      if (entry.kind === 'file' && entry.name.endsWith('.track.yaml')) {
+        return `« ${dir.name} » contient directement des pistes : c'est un dossier de CATÉGORIE, pas la bibliothèque. Choisissez le dossier « library » qui le contient.`;
+      }
+    }
+  } catch {
+    return null; // unreadable listing is not evidence of anything
+  }
+  return `« ${dir.name} » ne contient pas track.schema.json — ce n'est probablement pas le dossier « library ».`;
 }
 
 /** Name of the authorized folder, or null when none is usable yet. */

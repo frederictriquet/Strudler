@@ -8,7 +8,7 @@
 //   - `s` (+ optional `n` sample index) → a sound row, one per sound name
 //   - anything else → a single catch-all row, so nothing is silently dropped
 
-import type { HapInfo } from '@core/engine/StrudelEngine';
+import type { HapInfo, SourceRange } from '@core/engine/StrudelEngine';
 import { isAccidental, midiToNoteName, toMidi } from '@core/music/notes';
 
 export const BEATS_PER_CYCLE = 4;
@@ -38,6 +38,36 @@ export interface RollEvent {
   label: string;
   /** Index of the `stack()` layer that produced it, for colouring. [SPEC-18.9] */
   layer: number;
+  /** Character ranges of the source that produced it. [SPEC-18.27] Only meaningful
+   *  when the queried string was the text the user is looking at. */
+  locations: SourceRange[];
+}
+
+/** Playback state of an event at a given moment. [SPEC-18.27] */
+export type EventPhase = 'idle' | 'attack' | 'held';
+
+/** How long the attack flash lasts, in beats. Short enough to read as a hit
+ *  rather than a level: a kick lasts a whole beat, and lighting it up for that
+ *  long looks sluggish. */
+export const FLASH_BEATS = 1 / 8;
+
+/**
+ * Where an event stands relative to the playhead. [SPEC-18.27]
+ * `phaseBeats` is the playhead position WITHIN the declared phrase, which is the
+ * whole drawn width since the view spans exactly one turn [SPEC-18.26].
+ */
+export function eventPhase(event: RollEvent, phaseBeats: number | null): EventPhase {
+  if (phaseBeats === null) return 'idle';
+  if (phaseBeats < event.begin || phaseBeats >= event.end) return 'idle';
+  return phaseBeats - event.begin < FLASH_BEATS ? 'attack' : 'held';
+}
+
+/** Playhead position inside the declared phrase, or null when stopped.
+ *  Modulo, like the instrument's slot gauge: Strudel patterns are aligned to the
+ *  global cycle grid, so the absolute beat maps straight onto the phrase. */
+export function phaseWithin(playheadBeat: number | null, phraseBeats: number): number | null {
+  if (playheadBeat === null || phraseBeats <= 0) return null;
+  return (((playheadBeat % phraseBeats) + phraseBeats) % phraseBeats);
 }
 
 /** Events queried from one layer. */
@@ -99,6 +129,7 @@ export function buildRoll(groups: LayerHaps[], spanCycles: number): Roll {
         gain,
         label,
         layer: group.layer,
+        locations: hap.locations,
       });
     }
   }
@@ -115,9 +146,36 @@ export function buildRoll(groups: LayerHaps[], spanCycles: number): Roll {
   return { rows: ordered, events, spanBeats: spanCycles * BEATS_PER_CYCLE };
 }
 
-/** Cycles to query for a phrase of `beats` beats: two full turns, so the repeat
- *  is visible. Capped so a long phrase stays readable. */
+/** Phrase lengths a track declares. [SPEC-4.2] */
+const STANDARD_PHRASES = [4, 8, 16, 32, 64];
+
+/**
+ * Phrase length to declare for a pattern whose measured period is `periodBeats`.
+ * [SPEC-18.21]
+ *
+ * The period alone is the wrong answer: `s("bd*4")` repeats every beat, and no one
+ * calls that a one-beat track. The musical answer is the smallest STANDARD phrase
+ * that contains the period — which is exactly what the library's own 23 tracks
+ * declare, in every single case (verified against their `beats` fields).
+ *
+ * Returns null for a non-periodic pattern: there is nothing to declare, and
+ * guessing would be worse than saying so.
+ */
+export function phraseBeatsFor(periodBeats: number | null): number | null {
+  if (periodBeats === null || periodBeats <= 0) return null;
+  return STANDARD_PHRASES.find((p) => p >= periodBeats) ?? Math.ceil(periodBeats / 64) * 64;
+}
+
+/**
+ * Cycles to query for a phrase of `beats` beats: exactly ONE turn. [SPEC-18.26]
+ *
+ * The view used to show two turns so the repeat would be visible, but drawing the
+ * same bars twice made the roll read as a longer piece than the declared length —
+ * one counted eight kicks against a « 4 beats » readout. The whole width is now
+ * the loop, so the right edge IS where it turns over. Capped so a long phrase
+ * stays readable.
+ */
 export function spanCyclesFor(phraseBeats: number | null): number {
   const beats = phraseBeats && phraseBeats > 0 ? phraseBeats : 8;
-  return Math.min(64 / BEATS_PER_CYCLE, (beats * 2) / BEATS_PER_CYCLE);
+  return Math.min(64 / BEATS_PER_CYCLE, beats / BEATS_PER_CYCLE);
 }

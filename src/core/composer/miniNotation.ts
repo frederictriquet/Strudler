@@ -163,7 +163,9 @@ export const FUNCTIONS: SyntaxEntry[] = [
     token: 'stack(a, b)',
     names: ['stack'],
     label: 'superposition',
-    text: 'Joue plusieurs patterns en même temps. C’est la couche : un argument = une ligne du morceau.',
+    text:
+      'Joue plusieurs patterns en même temps. C’est la couche : un argument = une ligne du morceau. ' +
+      '⚠ Un appel chaîné APRÈS le `stack` s’applique à chaque couche — voir les pièges.',
   },
   {
     token: 'cat(a, b)',
@@ -886,6 +888,65 @@ function explainExact(text: string, pos: number, spans: Span[]): Explanation | n
  * Never throws: returns null whenever nothing is recognised (which includes
  * half-typed text, and is the normal case while typing).
  */
+/**
+ * Rules that bite rather than tokens to look up. [SPEC-18.13]
+ *
+ * Each one is a mistake that produces NO error message — the pattern evaluates and
+ * something plays, just not what was meant. That silence is exactly why they belong
+ * in the sheet: a beginner has no way to discover them from a failure.
+ *
+ * No `names`, so `explainAt()` never matches them: they are reference material, not
+ * things one puts a caret on.
+ */
+export const PITFALLS: SyntaxEntry[] = [
+  {
+    token: 'stack(…).s()',
+    label: 'suffixe global',
+    text:
+      'Un appel chaîné après un `stack` s’applique à toutes ses couches, et un contrôle posé plus tard gagne. ' +
+      'Sur une couche déjà complète (`n(…).sound("sawtooth")`), le `.s()` final emballe sa valeur au lieu de la compléter : ' +
+      'elle devient muette, sans erreur. Mettez `s(…)` sur chaque couche, ou n’appliquez le suffixe qu’à un sous-`stack`.',
+  },
+  {
+    token: '*n contre !n',
+    label: 'serrer ou occuper',
+    text:
+      '`*n` répète dans l’emplacement occupé : `"bd*7 hh"` entasse 7 kicks dans la première moitié du cycle. ' +
+      '`!n` répète en prenant n pas : `"bd!7 hh"` donne 8 pas réguliers. Même nombre de frappes, rythme opposé.',
+  },
+  {
+    token: '.late(n)',
+    label: 'décalage en cycles',
+    text:
+      'Décale en cycles, pas en beats. Un cycle = 4 beats, donc un demi-beat s’écrit `.late(1/8)`. ' +
+      '`.late(0.5)` décale de 2 beats — sur un motif régulier, cela retombe sur le temps et rien ne change à l’oreille.',
+  },
+  {
+    token: '.slow(n)',
+    label: 'étire, ne rallonge pas',
+    text:
+      'Étire le contenu ; cela ne crée pas une phrase plus longue. `s("bd*8").slow(2)` redevient un kick par beat, ' +
+      'identique à `s("bd*4")`. Une phrase de 8 beats exige que les deux mesures diffèrent : `<…>` ou `cat(…)`.',
+  },
+];
+
+/**
+ * Split help text on its backtick-delimited code spans. [SPEC-18.13]
+ *
+ * The tables mark code with backticks; a view must render those as code rather
+ * than print the character. Splitting — never injecting HTML — keeps the help
+ * text data, so an entry can never smuggle markup into the page.
+ *
+ * Shared by the caret explanation and the cheat sheet, which render the same
+ * entries in two different places.
+ */
+export function codeSegments(source: string): Array<{ code: boolean; value: string }> {
+  return source
+    .split('`')
+    .map((value, i) => ({ code: i % 2 === 1, value }))
+    .filter((segment) => segment.value !== '');
+}
+
 export function explainAt(text: string, caret: number): Explanation | null {
   try {
     if (typeof text !== 'string' || text === '') return null;

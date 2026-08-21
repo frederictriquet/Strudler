@@ -27,6 +27,9 @@ interface FileSystemFileHandle extends FileSystemHandle {
 
 interface FileSystemDirectoryHandle extends FileSystemHandle {
   readonly kind: 'directory';
+  /** Async iteration over the entries, used to tell a library root from a
+   *  category folder. */
+  values(): AsyncIterableIterator<FileSystemHandle>;
   getDirectoryHandle(
     name: string,
     options?: { create?: boolean },

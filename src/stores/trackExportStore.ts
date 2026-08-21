@@ -216,13 +216,19 @@ export async function refreshTargetExists(): Promise<void> {
   targetExists.set(await trackExists(get(exportCategory), get(exportSlug)));
 }
 
-/** Authorize the library folder. MUST be called from a user gesture. */
+/** Warning about the folder just chosen — wrong level, most often. [SPEC-18.15] */
+export const exportFolderWarning = writable<string | null>(null);
+
+/** Choose the library folder. MUST be called from a user gesture. Always reopens
+ *  the picker, so a wrong choice can be corrected. */
 export async function pickExportFolder(): Promise<void> {
   exportError.set(null);
   try {
-    exportFolder.set(await chooseFolder());
+    const chosen = await chooseFolder();
+    exportFolder.set(chosen.name);
+    exportFolderWarning.set(chosen.problem);
     await refreshTargetExists();
-    exportStatus.set(`Dossier autorisé : ${get(exportFolder)}`);
+    exportStatus.set(`Dossier : ${chosen.name}`);
   } catch (err) {
     // A cancelled picker is a choice, not a failure worth shouting about.
     if ((err as Error).name === 'AbortError') return;

@@ -78,6 +78,50 @@ export function splitStack(pattern: string): StackParts | null {
   return null; // unbalanced — leave it to the evaluator to complain
 }
 
+/** Indent every line of a layer by two spaces, so a multi-line layer stays
+ *  readable inside the formatted stack. */
+function indent(code: string): string {
+  return code
+    .trim()
+    .split('\n')
+    .map((line) => `  ${line}`)
+    .join('\n');
+}
+
+/** A `stack(...)` written over several lines — the shape the library uses. */
+function formatStack(layers: string[]): string {
+  return `stack(\n${layers.map(indent).join(',\n')}\n)`;
+}
+
+/**
+ * Add `snippet` as a new layer of `pattern`. [SPEC-18.23]
+ *
+ * Text-level, like everything else here — no evaluation, no parser. Three cases,
+ * and the third is the one that matters:
+ *
+ *   empty pattern            → the snippet alone; a lone layer needs no stack
+ *   `stack(a, b)`            → one more argument
+ *   anything else            → the WHOLE existing pattern becomes one layer
+ *
+ * That last case covers a plain pattern, but also a stack carrying a chained
+ * suffix. Appending into `stack(a, b).s("piano")` would place the new layer under
+ * that `.s()` — controls set later win — silently turning an inserted drum into a
+ * piano. Wrapping instead costs one level of parentheses and is the only correct
+ * result.
+ */
+export function addLayer(pattern: string, snippet: string): string {
+  const existing = pattern.trim();
+  const added = snippet.trim();
+  if (added === '') return pattern;
+  if (existing === '') return added;
+
+  const parts = splitStack(existing);
+  if (parts && parts.suffix === '' && parts.layers.length > 0) {
+    return formatStack([...parts.layers, added]);
+  }
+  return formatStack([existing, added]);
+}
+
 /** Rebuild a pattern from a subset of layers, keeping the chained suffix. */
 export function joinStack(layers: string[], suffix: string): string {
   if (layers.length === 0) return 'silence';

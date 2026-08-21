@@ -4,3 +4,4 @@ dist/
 *.local
 .vite/
 study/
+tsconfig.node.tsbuildinfo

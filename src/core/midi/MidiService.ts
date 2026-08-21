@@ -115,6 +115,27 @@ export class MidiService {
     return false;
   }
 
+  /**
+   * Same as `send`, but SCHEDULED: Web MIDI timestamps are on the
+   * `performance.now()` clock, and the browser emits the bytes at that instant
+   * instead of when JS happens to run. This is what keeps a beat clock steady and
+   * lets a hit be announced ahead of time. [SPEC-19]
+   *
+   * A timestamp in the past is sent immediately (spec behaviour), which is the
+   * right fallback for a late cue.
+   */
+  sendAt(deviceMatch: string, bytes: number[], timestamp: number): boolean {
+    if (!this.access) return false;
+    const lower = deviceMatch.toLowerCase();
+    for (const output of this.access.outputs.values()) {
+      if (output.state === 'connected' && (output.name ?? '').toLowerCase().includes(lower)) {
+        output.send(bytes, timestamp);
+        return true;
+      }
+    }
+    return false;
+  }
+
   /** Snapshot of every known port. */
   listPorts(): MidiPortInfo[] {
     if (!this.access) return [];

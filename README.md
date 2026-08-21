@@ -49,6 +49,30 @@ dès le premier lancement.
   le logiciel Elgato. MK.2 : colonnes 1-4 = canaux, lignes = slots S/M/R, colonne 5 = mode/fenêtre.
   Chaque touche s'éclaire selon l'état de la piste. ⚠ Matériel non validé (calage par modèle).
 
+## Sortie scénique — VJing / lumière `[SPEC-19]`
+
+Strudler sait ce qu'il joue : il **diffuse** tempo, position et frappes vers une autre application,
+qui se charge du rendu (lumière, visuels). Aucune analyse audio côté récepteur, et les frappes sont
+annoncées **avant** d'être audibles — le séquenceur travaille en avance — de quoi anticiper un fondu.
+Réglages dans la modale MIDI/Session ; les deux sorties sont éteintes par défaut et n'émettent rien
+tant qu'elles le sont.
+
+- **MIDI** (QLC+, Resolume, VDMX…) : horloge MIDI 24 ppqn + Start/Stop/SPP, et une note par catégorie
+  (vélocité = gain, numérotation batterie GM : `kick 36`, `snare 38`, `hats 42`…). Port de sortie
+  reconnu par sous-chaîne, **distinct** de celui des contrôleurs pour ne pas perturber les LED — sur
+  macOS, active le bus **IAC** dans « Configuration audio et MIDI ».
+- **WebSocket JSON** (application maison) : un objet par cue (`tempo`, `transport`, `beat`, `onset`,
+  `slot`), horodaté deux fois — `t` l'émission, `at` l'instant **visé**. Le récepteur est le serveur,
+  un navigateur ne pouvant pas écouter sur un port.
+
+```bash
+npm run cues:monitor   # récepteur de référence : affiche le flux et l'avance mesurée
+```
+
+`scripts/cue-monitor.mjs` est sans dépendance et prévu pour être **copié** comme squelette du vrai
+récepteur. Hors périmètre pour l'instant (mais simples puits à ajouter derrière le même bus) : OSC,
+Art-Net/sACN, Ableton Link — tous en UDP, donc inaccessibles au navigateur sans un pont local.
+
 ## Démarrer
 
 ```bash
@@ -57,6 +81,114 @@ npm run dev      # serveur Vite (http://localhost:5173)
 npm run build    # type-check svelte-check + build de production
 npm run check    # type-check seul
 ```
+
+## Deviner la tonalité d'une suite d'accords `[SPEC-18.31]`
+
+Outil **Accords** → champ « Tonalité d'une suite d'accords ». Accepte `Dm Gm`, `C F Ab Bb`, ou
+directement l'alternation d'un pattern : `<E G#m B F#>`.
+
+| suite | proposé | certitude |
+|---|---|---|
+| `C F G7 C` | 8B · DO majeur | **certaine** — dominante + cadence |
+| `Am Dm E7 Am` | 8A · LA mineur | **certaine** — mineur harmonique |
+| `Cmaj7 Fmaj7` | 8B · DO majeur | probable — aucune dominante |
+| `Dm Gm` | 7A · RÉ mineur | ⚠ incertaine — SI♭ majeur et SOL mineur aussi |
+| `C F Ab Bb` | 7B · FA majeur | ⚠ incertaine — 6 lectures expliquent tout |
+| `C` | — | indéterminée — un seul accord |
+
+**Ce qui contredit l'hypothèse est toujours affiché** : accords hors tonalité, symbole illisible
+ignoré, absence de dominante, lectures concurrentes. Chaque accord reçoit son chiffrage (`C=I`,
+`G7=V7`) ou la mention de son emprunt (`Ab = ♭VI, emprunt au mineur parallèle`). Un bouton adopte la
+tonalité proposée dans le champ `key:` de la piste.
+
+## Reconnaître un accord `[SPEC-18.30]`
+
+Dans l'atelier, outil **Accords** → « Reconnaître un accord », **trois champs** selon la notation
+dont tu disposes :
+
+| champ | exemple | donne |
+|---|---|---|
+| **Notes — A B C** | `d3,a3,f4` | `Dm` |
+| **Notes — DO RÉ MI** | `ré3,la3,fa4` · `sib3` · `sol#` | `Dm` |
+| **Degrés dans la gamme** | `1,5,10` (lus dans la tonalité choisie) | `Dm` |
+
+Chaque proposition porte un bouton **🎹** qui la joue au piano (une frappe, sans toucher la boucle
+en cours d'écriture) : deux lectures d'un même ensemble de notes diffèrent par un voicing qui
+s'entend mieux qu'il ne se lit.
+
+Chaque proposition affiche le symbole **et son nom français** — `CM7` · « DO majeur 7 » — parce
+que le symbole part tel quel dans le pattern mais ne se lit pas de la même façon par tout le monde.
+
+Ce que tu saisis dans un champ apparaît **traduit dans les deux autres** (grisés en pointillés,
+mais modifiables). Les degrés montent : `1,5,10` donne `D3 A3 F4`, pas trois notes tassées dans une
+octave. Au-delà de 7 on passe à l'octave suivante (`8` = tonique à l'octave), et `b3`/`#4` altèrent
+un degré. Chaque champ est strict ; un nom de l'autre notation renvoie vers le bon champ.
+
+Le symbole rendu est utilisable directement :
+
+| collé | proposé | pourquoi |
+|---|---|---|
+| `d3,a3,f4` | `Dm` | — |
+| `d3,bb3,g4` | `Gm` + basse `D` | Strudel refuse les accords barrés (`Gm/D`) |
+| `c,e,g,b` | `CM7` | `Cmaj7` n'est pas reconnu, `CM7` oui |
+| `c,eb,gb` | `Co` | idem pour `Cdim` |
+| `d,f,a,c` | `Dm7` | le voicing de Strudel omet le `A`, c'est signalé |
+| `c,d,e` | — | aucun accord connu ne correspond |
+
+Chaque proposition est **essayée dans Strudel** avant d'être offerte : seule une orthographe qui
+sonne les hauteurs collées est retenue. Le bouton insère le `chord(…).voicing()` correspondant,
+avec la couche de basse quand il s'agit d'un renversement.
+
+## Instruments General MIDI `[SPEC-17.55]`
+
+Les 125 instruments `gm_*` du REPL (`gm_piano`, `gm_electric_guitar_muted`, `gm_flute`…) sont
+disponibles, **entièrement depuis le disque** :
+
+```bash
+npm run samples:soundfonts              # 866 presets, ~140 Mo, une seule fois
+npm run samples:soundfonts --  --list   # les 125 instruments et leurs variantes
+npm run samples:soundfonts --  --default-only   # 1re variante seulement (~10 Mo)
+```
+
+Destination : `~/Music/Sounds/soundfonts` (ou `$STRUDLER_SOUNDS_DIR/soundfonts`). Re-lançable :
+les fichiers déjà là sont ignorés, un import interrompu reprend où il s'est arrêté.
+
+`@strudel/soundfonts` diffuse ses presets depuis `felixroos.github.io` ; Strudler le fait pointer
+sur la copie locale. Aucune requête réseau au déclenchement d'un `gm_*` — un cache navigateur ne
+contient que ce qui a déjà été joué, ce n'est pas de la disponibilité. Tant que les presets ne
+sont pas là, les instruments **ne sont pas enregistrés** et l'application affiche la commande à
+lancer, au lieu de proposer 125 sons muets.
+
+`.n(i)` choisit la variante d'instrument, avec le même index que sur strudel.cc.
+
+## Sauvegarde — rien ne peut être perdu `[SPEC-13.5→13.9]`
+
+Tout l'état saisi (associations piste↔pad, scènes, sessions, favoris de sons, brouillon de
+l'atelier) vit dans le `localStorage` du navigateur. Un « effacer les données de navigation »,
+une éviction sous pression disque ou un changement de port suffiraient à le faire disparaître.
+Il est donc **copié sur disque à chaque modification** :
+
+```
+.state/
+  strudler-state.json          copie courante (tout le localStorage, en texte brut)
+  snapshots/2026-…Z.json       états précédents, rotation à 30
+```
+
+- La copie est écrite par le serveur Vite (`vite-plugins/stateBackup.ts`), donc **hors-ligne** et
+  sans service tiers. Servi autrement qu'avec `npm run dev` / `npm run preview`, la page annonce
+  clairement que le miroir est indisponible.
+- Si le navigateur est retrouvé **vide** alors qu'une copie existe, l'état est **restauré au
+  chargement** et l'application le signale.
+- **Réglages ▸ Sauvegarde** montre la dernière copie, la liste des instantanés (avec restauration
+  en un clic) et propose un **export/import** d'un fichier unique — la seule voie pour passer sur
+  une autre machine, un autre navigateur ou un autre profil.
+- Le port est verrouillé sur `5173` : un second `npm run dev` échoue au lieu de glisser sur
+  `:5174`, où l'application afficherait un état vide (autre origine).
+- Le dossier `library/` autorisé ne peut pas être sauvegardé (le navigateur n'expose pas de
+  chemin) : seul son **nom** est conservé, pour indiquer lequel réautoriser après un import.
+
+`.state/` est dans le dépôt : le versionner donne un historique gratuit. Pour l'ignorer,
+une ligne dans `.gitignore` suffit.
 
 ## État d'avancement
 
@@ -117,7 +249,8 @@ src/
     launch/             # [SPEC-8]   Launcher : mode, fenêtre W, quantisation, pending
                         # live-coding [SPEC-9.2] : override de code par slot (ChannelRack)
     session/            # [SPEC-11]  format de session (journal de gestes) + (dé)sérialisation
-    persist/            # [SPEC-13]  localStorage sûr (associations, réglages, sessions)
+    persist/            # [SPEC-13]  localStorage sûr + miroir disque (backup.ts) [SPEC-13.5]
+    composer/           # [SPEC-18]  atelier : sons, favoris, couches, dossier library
   stores/               # [SPEC-13] état applicatif (Svelte stores)
   lib/                  # composants Svelte (UI) [SPEC-10]
   types/                # déclarations ambiantes (@strudel/*)
@@ -127,6 +260,8 @@ src/
 library/                # [SPEC-4] pistes : library/<catégorie>/<slug>.track.yaml
   track.schema.json     #           schéma JSON des pistes (validation dans l'éditeur)
   kick/ hats/ snare/ bass/ lead/ pad/
+vite-plugins/           # soundsServer.ts (sons locaux) + stateBackup.ts (miroir d'état)
+.state/                 # [SPEC-13.5] copie disque du localStorage + instantanés datés
 docs/                   # SPEC.md, PLAN.md
 study/                  # matériel de référence (expérimentations, nanoKONTROL2…)
 ```

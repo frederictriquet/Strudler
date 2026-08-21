@@ -11,9 +11,13 @@
     rackError,
   } from '@stores/rackStore';
   import { slotLabel } from '@core/channels/types';
+  import { onDestroy } from 'svelte';
+  import ExportTrackModal from '@lib/ExportTrackModal.svelte';
+  import { closeTrackExport, exportOpen, openTrackExport } from '@stores/trackExportStore';
 
   const channels = channelsState;
   const error = rackError;
+  const exportModal = exportOpen;
 
   let selChannel = $state<number>(-1);
   let selSlot = $state<number>(-1);
@@ -59,6 +63,22 @@
     resetSlotCode(selChannel, selSlot);
     code = slotCode(selChannel, selSlot);
   }
+
+  // [SPEC-15] Make the live edit permanent: the code shown here (not the one last
+  // evaluated) is what gets exported, so what is read is what is written.
+  function onExport() {
+    if (!current) return;
+    openTrackExport({
+      code,
+      trackId: current.slot.trackId,
+      trackName: current.slot.trackName,
+      trackBeats: current.slot.trackBeats,
+    });
+  }
+
+  // Leaving advanced mode unmounts this panel: drop the dialog with it, so it does
+  // not pop back up on its own the next time the mode is entered.
+  onDestroy(closeTrackExport);
 
   function onKeydown(e: KeyboardEvent) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -135,6 +155,13 @@
     <div class="actions">
       <button class="eval" onclick={onEval}>▶ Évaluer <kbd>Ctrl+↵</kbd></button>
       <button onclick={onReset} title="Revenir au pattern du disque">⟲ Disque</button>
+      <button
+        onclick={onExport}
+        disabled={!current || code.trim() === ''}
+        title="Écrire ce code dans library/<catégorie>/<slug>.track.yaml"
+      >
+        💾 Enregistrer…
+      </button>
       {#if lengthLabel}
         <span class="length {lengthKind}">Longueur {lengthLabel}</span>
       {/if}
@@ -146,6 +173,10 @@
     {/if}
   {/if}
 </section>
+
+{#if $exportModal}
+  <ExportTrackModal />
+{/if}
 
 <style>
   .panel {

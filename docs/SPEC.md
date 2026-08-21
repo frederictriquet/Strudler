@@ -198,6 +198,47 @@ Une piste rejetée DOIT être signalée par un **toast** au chargement, en plus 
 
 **[SPEC-13.4]** Les **sessions** enregistrées sont persistées et listables/rejouables.
 
+### Durabilité de l'état
+
+Tout ce qui précède vit dans le `localStorage` d'**une** origine. Trois accidents de natures
+différentes le suppriment, et aucun ne se règle en changeant de technologie de stockage
+(IndexedDB obéit aux mêmes règles d'effacement et d'éviction) : la dérive d'origine, l'effacement
+ou l'éviction par le navigateur, et un bug applicatif qui écrase une clé — ce dernier s'est déjà
+produit (`[SPEC-17.51]`). La réponse est une copie **hors du navigateur**.
+
+**[SPEC-13.5]** L'intégralité de l'état persisté est copiée sur disque dans
+`<projet>/.state/strudler-state.json` **à chaque écriture**. Le balayage est **générique** : il
+énumère les clés portant le préfixe `strudler:` au lieu de les nommer. Une clé ajoutée
+ultérieurement est donc sauvegardée sans intervention, ce qui est la propriété qui rend la
+garantie durable. Les valeurs sont recopiées en **texte brut**, jamais réinterprétées : un
+changement de schéma d'une donnée ne peut pas casser la sauvegarde, et celle-ci n'a aucun format
+propre à migrer. Le déclenchement est un **point d'accroche unique** dans la couche de stockage,
+non un appel chez chaque appelant.
+
+**[SPEC-13.6]** L'origine est **verrouillée** (`strictPort`) : un port occupé provoque une erreur
+au lancement au lieu d'ouvrir l'application sur une origine voisine avec un état vide. L'origine
+demande en outre le **stockage persistant** au navigateur, ce qui l'exempte de l'éviction sous
+pression disque.
+
+**[SPEC-13.7]** Des **instantanés datés** conservent les états précédents (rotation à 30). Un
+instantané n'est écrit que si le contenu a changé et si le précédent est assez ancien ; deux
+paquets de même horodatage ne s'écrasent jamais. C'est ce qui permet de revenir en arrière après
+un écrasement fautif.
+
+**[SPEC-13.8]** Quand le navigateur est **entièrement vide** et qu'une copie disque existe, l'état
+est **restauré d'office** et le fait est annoncé dans l'UI. Un navigateur contenant ne serait-ce
+qu'une entrée est autoritaire : on n'y touche pas. La restauration précède l'initialisation des
+stores, qui lisent leurs clés à l'évaluation de leur module.
+
+**[SPEC-13.9]** Un **export/import** d'un fichier unique couvre le changement de machine, de
+navigateur ou de profil — le seul cas qu'une copie locale ne couvre pas. L'import est présenté
+(date, origine, nombre d'entrées) et confirmé avant d'écrire.
+
+**Limite assumée** : le miroir passe par le serveur de développement/prévisualisation. Servi
+autrement, un `dist/` n'a pas ces routes et l'UI l'annonce explicitement, plutôt que de laisser
+croire à une protection inexistante `[SPEC-14.3]`. Le *handle* du dossier `library/` n'est pas
+sérialisable : seul son **nom** est sauvegardé, pour indiquer quel dossier réautoriser.
+
 ---
 
 ## [SPEC-14] Contraintes non-fonctionnelles
@@ -272,6 +313,27 @@ Une piste rejetée DOIT être signalée par un **toast** au chargement, en plus 
 
 **[SPEC-17.53] Noms complets des effets dans la tranche de canal.** Le sélecteur d'effet de chaque canal DOIT afficher le **nom complet** de l'effet (« Trémolo », « Passe-bas », « Saturation »…) et non son abréviation : sur scène, un sigle de trois lettres n'est pas lisible d'un coup d'œil. Le **label court** reste défini pour les surfaces contraintes (LED, Stream Deck). Le nom déborde en ellipse plutôt que d'élargir le canal [SPEC-17.2]. *Impl. : champ `name` dans `FX_META` (`core/channels/types.ts`), `.fxbtn` + infobulles/`aria-label` dans `ChannelRack.svelte`.*
 
+**[SPEC-17.54] Parité sonore avec le REPL de Strudel.** Un pattern DOIT sonner **de la même façon** dans Strudler et dans le REPL officiel. L'écart ne venait pas du moteur mais de l'**inventaire** : `s("hh")` désignait le dossier dirt-samples local ici et uzu-drumkit là-bas, si bien que `n("4")` choisissait deux fichiers sans rapport.
+
+Strudler enregistre donc, **après** sa banque locale, les mêmes banques que le prebake du REPL (piano, VCSL, tidal-drum-machines, uzu-drumkit, uzu-wavetables, mridangam). L'**ordre est la règle** : `registerSound()` fait `soundMap.setKey(nom, …)`, donc un enregistrement ultérieur **remplace** le précédent — il ne fusionne pas. Les noms partagés (`hh`, `bd`, `piano`…) prennent la version du REPL ; tout ce que l'utilisateur possède en propre et que le REPL n'a pas (`jvbass`, `arpy`, `808sd`, dossiers personnels) survit intact. Vérifié : 1043 sons locaux + 848 distants → **1070 noms distincts**, `hh` résolu vers uzu-drumkit comme dans le REPL.
+
+Fusionner localement ne pouvait pas y suffire : le scanner de `soundsServer` **concatène** les listes de deux dossiers homonymes, donc `n(4)` serait resté le 4ᵉ fichier local.
+
+Contraintes tenues :
+- **chargement partiel assumé** — chaque banque est chargée séparément et un échec est *collecté*, jamais propagé : une CDN injoignable ne doit pas coûter ses sons locaux à l'utilisateur. Les banques manquantes sont **nommées** [SPEC-14.3], un chargement partiel silencieux étant pire que l'absence ;
+- **hors-ligne préservé** [SPEC-14.4] — seules les *cartes* JSON sont récupérées ici ; les fichiers audio restent chargés à la première utilisation et mis en cache par le Service Worker ;
+- **le navigateur de sons liste toutes les banques**, dans le même ordre et avec la même règle d'écrasement, sinon il annoncerait un nombre d'échantillons que l'on n'entendra pas.
+
+⚠ La liste est celle du prebake du REPL (`website/src/repl/prebake.mjs` des sources Strudel, conservées sous `study/`) : elle vit dans le site, pas dans les paquets `@strudel/*`, donc **aucun moyen de la lire à l'exécution** — à revoir quand Strudel change ses défauts. *Impl. : `src/core/engine/sampleBanks.ts`, `loadSamples(source, base?)`, appelé par `samplesStore`, `composerStore` et `core/composer/preview.ts`.*
+
+**[SPEC-17.53] Les réglages d'une piste ne sont plus écrasés par le canal.** Corrige [SPEC-17.23]/[SPEC-17.28]. La chaîne de voix ajoutait ses contrôles **après** le code de la piste ; or en Strudel un contrôle posé plus tard **remplace** le précédent. Un `.lpf(800)` écrit dans une piste devenait donc le cutoff neutre du canal (20 kHz), un `.room(0.25)` devenait 0, un `.gain(0.9)` disparaissait au profit du volume du canal — sans aucun signal. Constaté sur 21 des 23 pistes de la bibliothèque, dont les trois basses et les deux progressions d'accords, qui ne sonnaient donc pas comme elles étaient écrites.
+
+Deux règles :
+- **Insertion conditionnelle.** `lpf`/`lpq`, `hpf`/`hpq`, `delay` (avec son temps et sa réinjection) et `room`/`roomsize` ne sont insérés **que lorsqu'ils sont engagés** — l'effet activé, ou le filtre bipolaire écarté du neutre. Au repos la piste garde son propre son ; toucher l'effet rend la main au canal. Prolonge la règle qui existait déjà pour les effets lourds [SPEC-17.28]. Toute bascule d'effet, et tout **franchissement** du neutre par le filtre bipolaire, changent la forme de la chaîne et exigent donc une **réévaluation** des voix du canal ; un balayage à l'intérieur d'une moitié reste live via les `ref`.
+- **Le volume MULTIPLIE.** Le fader de canal doit mettre à l'échelle ce que la piste déclare [SPEC-4.2], pas le jeter : `.mul(gain(chgain(n)))` au lieu de `.gain(chgain(n))`. Sur une piste sans `gain`, `mul` rend le facteur lui-même, donc le comportement antérieur est conservé.
+
+**Exception assumée** : `djf` et le phaser restent **inconditionnels**. Ils adossent des gestes maintenus [SPEC-17.41, SPEC-17.46] qui doivent mordre sur des voix déjà en cours, ce qu'une insertion conditionnelle n'obtiendrait qu'en réévaluant en plein geste ; et `setGlobalFilter` a besoin que le nœud `djf` existe pour l'atteindre. Leur neutre est réellement inerte — profondeur 0 ne construit rien, `djf` 0,5 contourne. *Impl. : `voiceChain()` dans `StrudelEngine`, reconstruction dans `ChannelRack.toggleChannelFx`/`setFilter`.*
+
 **[SPEC-17.52] Les scènes mémorisent la quantisation des canaux.** Étend [SPEC-17.36]. Une scène capture, en plus de l'ensemble armé, l'**état de quantisation de chaque canal** [SPEC-17.17] : contrairement à un volume ou à un paramètre d'effet, c'est un **mode discret** et non une position de potentiomètre, donc le restaurer ne « tire » aucun curseur — et une scène DOIT se relancer comme elle a été mémorisée. Au rappel, la quantisation est appliquée **avant** les bascules de slots, et seuls les canaux dont l'état diffère sont basculés (une seule mise à jour LED et une seule persistance par canal). Les scènes enregistrées au format précédent (liste de slots armés seule) sont **migrées** au chargement et laissent la quantisation inchangée. *Impl. : `ChannelRack.quantizedSnapshot()`, interface `Scene` + `coerceScene` (migration) dans `rackStore`, `storeScene`/`recallScene`.*
 
 **[SPEC-17.51] Les associations persistées ne sont jamais purgées.** Corrige [SPEC-13.2]. À la restauration, une association slot → piste dont l'identifiant **ne se résout pas** dans la bibliothèque DOIT être **conservée**, jamais effacée : l'état restauré est resauvegardé quelques centaines de millisecondes plus tard, donc toute purge est **définitive** — une bibliothèque momentanément illisible (fichier renommé, glob cassé, erreur de chargement) suffirait à détruire la session entière. Idem pour les **catégories** de canal inconnues. Un slot non résolu est **inactif** (pas de son, LED éteinte, aucune évaluation) et **visiblement en défaut** dans la GUI : bordure rouge et affichage de l'identifiant manquant, afin que le fichier absent soit nommable. Le nombre et la liste des pistes introuvables sont signalés en **erreur visible** au chargement [SPEC-14.3], et presser un tel pad affiche la raison. Un `codeOverride` de live-coding [SPEC-9.2] rend le slot jouable malgré l'identifiant non résolu. Restaurer le fichier restaure les pads. *Impl. : `isMissingTrack` (`core/channels/types.ts`), restauration sans purge + `notify` dans `rackStore`, garde dans `ChannelRack.toggleSlot`/`rebuildActiveVoices`, LED via `slotVisual`, classe `.slot.missing` dans `ChannelRack.svelte`.*
@@ -286,7 +348,7 @@ Motif : écrites en notes absolues, les progressions étaient **déplacées en b
 
 Le dictionnaire **`triads`** est imposé explicitement : le défaut (`ireal`) produit des voicings de jazz avec septièmes et tensions, là où ces progressions veulent des triades simples. Nécessite `@strudel/tonal`, ajouté au scope d'évaluation. *Impl. : `import * as strudelTonal` + `evalScope(..., strudelTonal)` (`StrudelEngine`), déclaration de module dans `src/types/strudel.d.ts`, pistes `library/chords/*.track.yaml`.*
 
-**[SPEC-17.47] Échos calés au tempo (4 et 16 beats) + point d'insertion master unique.** Trois gestes maintenus (rangée du milieu, **ECHO 1**, **ECHO 2** et **ECHO 4**) envoient l'ensemble du mix dans une ligne de delay dont le temps vaut **1, 2 ou 4 beats**, recalculé d'après le tempo à chaque appui. Réinjection ≈ 0,55, soit des répétitions à −5 dB l'une de l'autre : quelques échos audibles puis extinction.
+**[SPEC-17.47] Échos calés au tempo (4 et 16 beats) + point d'insertion master unique.** Trois gestes maintenus (rangée du milieu, **ECHO 1**, **ECHO 2** et **ECHO 4**) envoient l'ensemble du mix dans une ligne de delay dont le temps vaut **1, 2 ou 4 beats**, recalculé d'après le tempo à chaque appui. Réinjection ≈ 0,55, soit des répétitions à −5 dB l'une de l'autre : quelques échos audibles puis extinction. **Un STOP DOIT faire taire les lignes d'écho.** Relâcher la touche ne ferme que l'envoi — la ligne continue de recirculer ce qu'elle contient, ce qui est l'intérêt même de l'effet, mais devient un défaut à l'arrêt : le transport est coupé et du son continue. Fermer l'envoi ne suffit pas, couper la réinjection non plus (le tampon se vide encore pendant une durée de delay, soit 2 s à 120 BPM pour un écho de 4 beats) : le **retour** doit être coupé aussi, en fondu court pour éviter le clic. Les gains nominaux ne sont pas restaurés par minuterie mais au **prochain appui**, sinon une queue résiduelle repasserait. L'état des touches maintenues est remis à zéro en même temps : les laisser allumées annoncerait un effet qui ne tourne plus.
 
 **Le maintien ouvre le départ (send), pas le retour** : relâcher cesse d'alimenter la ligne mais **laisse la queue résonner et s'éteindre** — c'est tout l'intérêt d'un écho, et la seule exception assumée à la règle « relâchement franc » [SPEC-17.43].
 
@@ -411,6 +473,52 @@ Conséquence assumée : après un changement d'effet (S/R), le knob et le fader 
 
 ---
 
+### Basse d'accord et transposition
+
+**[SPEC-17.48.1]** La couche de basse d'un accord s'écrit `chord(…).rootNotes(n)` **sans** `.note()`.
+`rootNotes` pose déjà le contrôle `note` ; l'envelopper une seconde fois emboîte les valeurs dans un
+objet `{note}` de plus, après quoi `.add(note(n))` — c'est-à-dire la transposition de tonalité, à la
+fois celle de l'instrument (`core/channels/ChannelRack.ts`) et celle de l'atelier — ne rend **plus
+rien du tout** et entraîne tout le `stack` avec elle. Les deux pistes d'accords de la bibliothèque
+étaient donc muettes dès que la tonalité de contexte différait de leur référence, l'inverse exact de
+ce qu'annonce `[SPEC-17.48]`. Mesuré : 16 attaques telles quelles, 0 après `.add(note(2))`.
+
+### Sons General MIDI & noms inconnus
+
+**[SPEC-17.55]** Les instruments **General MIDI** (`gm_*`, 125 instruments) du REPL sont
+disponibles. Leurs presets sont **copiés sur le disque** (`npm run samples:soundfonts`, ~140 Mo,
+une seule fois) et lus depuis la bibliothèque locale — jamais depuis un CDN. `@strudel/soundfonts`
+diffuse par défaut depuis `felixroos.github.io` ; un cache navigateur ne remplace pas une
+installation locale, il ne contient que ce qui a déjà été joué et seulement tant que le navigateur
+le veut `[SPEC-14.4]`. Les fichiers sont stockés **tels quels** : l'index de `n()` désigne donc la
+même variante d'instrument qu'ici et sur strudel.cc. Trois entrées de la liste de
+`@strudel/soundfonts` sont mal orthographiées à la source (`…_sf2_fible`, `…_sf2_fil e`, chaîne
+vide) : elles sont signalées par le script et laissées en place, car retirer un indice ferait
+diverger `n()` du REPL.
+
+**[SPEC-17.55.1]** La présence des presets est **vérifiée avant** d'enregistrer les instruments.
+Enregistrer 125 sons dont les données manquent produirait 125 noms visibles dans le navigateur de
+sons et muets au déclenchement — précisément le piège à supprimer. Absents, ils ne sont pas
+enregistrés et la commande à lancer est affichée `[SPEC-14.3]`.
+
+**[SPEC-17.55.2]** Le serveur de sons répond **404** pour un fichier absent sous `/sounds/`. Le
+repli HTML de Vite répondait `200` avec `index.html`, que superdough tentait de décoder comme de
+l'audio et `@strudel/soundfonts` comme un preset : échec obscur au lieu d'un « introuvable », et
+sonde de présence trompée.
+
+**[SPEC-17.56]** Un **nom de son inconnu** est signalé, jamais joué en silence. superdough répond
+à un nom non enregistré par du silence, indiscernable d'un pattern qui ne joue rien — le piano roll
+se remplit de notes et rien ne sort. Les noms employés par le pattern sont donc comparés au
+registre à chaque analyse, dans l'atelier, et nommés sous le champ ; un rappel est émis au moment
+du PLAY, là où le silence surprend. Un `bank()` composant le nom au déclenchement, ces événements
+sont laissés de côté plutôt qu'accusés à tort. La vérification n'a lieu qu'une fois les banques
+enregistrées, sans quoi tout nom d'échantillon paraîtrait inconnu.
+
+**[SPEC-17.57]** L'atelier capture le **journal de Strudel** (`initLogCapture`) comme l'instrument :
+ses avertissements n'arrivaient que dans la console de la page.
+
+---
+
 ## [SPEC-18] Atelier de composition (Composer)
 
 > Spécification **prospective** : rien n'est implémenté à ce jour. Décrit une seconde page de l'application, orientée **fabrication et vérification** de boucles, dont le produit est un fichier de piste [SPEC-4.6] directement consommable par l'instrument.
@@ -439,7 +547,8 @@ Conséquence assumée : après un changement d'effet (S/R), le knob et le fader 
 **[SPEC-18.7] Assistants générateurs à sens unique.** Les aides à l'écriture [SPEC-18.9] **produisent un fragment de code inséré dans le texte**, puis s'en désintéressent. Elles ne possèdent pas ce qu'elles ont écrit et ne cherchent pas à le relire. Cette règle, jointe à [SPEC-18.6], supprime par construction le problème de l'aller-retour.
 
 **[SPEC-18.8] Vue par interrogation (« piano roll »).** L'atelier DOIT afficher les **événements produits** par le pattern sur N cycles : hauteur ou nom de son en ordonnée, temps en abscisse. C'est la fonctionnalité **centrale** — celle qui permet de comparer d'un coup d'œil ce qu'on a écrit à une référence externe (capture d'écran d'un tutoriel, par exemple), et de constater ce que produisent réellement les fonctions opaques comme `voicing()`. Deux corollaires en découlent gratuitement :
-- la **longueur de boucle** devient visible (la répétition se voit) et DOIT préremplir le champ `beats` du fichier [SPEC-4.2], au lieu d'être devinée ;
+- la **période de répétition** devient visible (la répétition se voit) et est **affichée**, mais elle ne DOIT **pas** écraser le champ `beats` : `measureLengthBeats` renvoie la **plus petite** période, alors que `beats` déclare la **longueur de phrase** voulue par l'auteur — `s("bd*4")` se répète toutes les 1 beat et se déclare pourtant sur 4. L'atelier montre les deux et propose d'adopter la valeur mesurée en un clic. La vue s'étend sur **exactement un tour** de la phrase déclarée [SPEC-18.26], et signale les répétitions internes plus courtes qu'elle : c'est précisément l'écart qui surprend quand un pattern « joue trop vite » ;
+- rappel à rendre visible dans l'interface : `beats` est une **métadonnée** [SPEC-4.2] et **ne modifie pas la vitesse de lecture** — la durée d'une boucle est définie par son code (1 cycle = 4 beats) ;
 - la vue DOIT rester exacte pour les patterns non déterministes, en signalant l'absence de période plutôt qu'en inventant une longueur [SPEC-17.11].
 
 ### Structure & assistants
@@ -455,6 +564,65 @@ Une piste dont le `pattern` n'est pas un `stack()` de premier niveau est traité
 - **Roue euclidienne** — représentation circulaire de `s("bd(3,8)")`, notation puissante et illisible sans support visuel.
 - **Navigateur de sons** — parcourt la **même banque** que l'instrument (`/sounds/strudel.json`, [SPEC-12]), permet d'**auditionner** un échantillon et d'insérer son nom.
 
+**[SPEC-18.29] Variantes d'un son : dépliables et marquables une par une.** Un son indexé est un **dossier** : `hh` en compte treize chez l'utilisateur, dont un crash, deux kicks et un ride — `n("4")` n'y désigne donc pas « un charleston » mais un fichier précis. Le navigateur [SPEC-18.10] DOIT permettre de déplier ces variantes, d'écouter chacune, de l'insérer et de la **marquer individuellement** [SPEC-18.20].
+
+- **Identité** : une variante s'écrit `hh:4`, la syntaxe Strudel elle-même. Un favori porte donc le texte qu'il produira, aucun encodage propre à maintenir, et un fichier de favoris antérieur (noms nus) reste valide sans migration.
+- **Pas de dépliage pour les instruments mappés par note** [SPEC-17.18] : on les adresse par hauteur, pas par index — un piano n'a pas quatre-vingt-huit « variantes » à parcourir.
+- **Rendu** : une cellule dépliée occupe **toute la largeur**. Dans une seule colonne, les variantes se replieraient en bloc illisible et laisseraient la rangée en dents de scie — le défaut déjà corrigé pour les sons eux-mêmes. Les variantes sont **indentées, sur un fond propre et séparées par un filet**, pour se lire comme des enfants du son et non comme ses voisins.
+- **Le pliage n'appartient qu'au bouton de pliage.** Une variante marquée dépliait d'abord son son d'office, pour qu'un favori ne puisse jamais être annoncé sans être visible — mais cela **confisquait le pliage** dès qu'on marquait une variante. C'est un **indicateur** sur la ligne repliée qui porte l'information : `★ n` compte les variantes en favori, son infobulle les nomme, et le chevron de pliage passe en doré. Même information, contrôle rendu à l'utilisateur.
+- Le filtre « favoris seuls » reconnaît les variantes : marquer `hh:4` puis filtrer ne doit pas faire disparaître `hh`.
+
+⚠ Piège mesuré, à ne pas réintroduire : les cellules ne DOIVENT pas porter `overflow: hidden`. Un élément de grille dont `overflow` n'est pas `visible` reçoit une **taille minimale automatique nulle** ; la grille ayant une hauteur plafonnée (`max-height` + défilement), le navigateur a dimensionné ses 120 pistes sur ce zéro — chaque cellule s'est réduite à ses 2 px de bordure et `overflow: hidden` a découpé le contenu, ne laissant qu'une tranche horizontale des glyphes. La propriété qui masquait était aussi celle qui provoquait l'effondrement. Les angles arrondis sont obtenus en arrondissant les **enfants de bord**, pas en rognant la cellule.
+
+*Impl. : `soundKey`/`soundNameOf`/`keyBelongsTo`/`soundSnippet(entry, index)`/`soundInsertName` dans `core/composer/sounds.ts`, `previewSound(entry, bpm, index)` dans `core/composer/preview.ts`, dépliage et rangée de variantes dans `SoundBrowser.svelte`.*
+
+**[SPEC-18.28] Le travail en cours survit à un rechargement.** Enregistrer une piste écrit dans `library/`, le watcher du serveur de développement le voit, et la page **se recharge** — l'index de bibliothèque est un singleton dont le rack de l'instrument garde une référence, donc un échange à chaud ferait tourner deux copies [SPEC-17.31]. Correct côté instrument, destructeur côté atelier : il perdait ce qui était en train d'être écrit, au moment précis d'un enregistrement réussi.
+
+Plutôt qu'affaiblir ce garde-fou, l'espace de travail est **restauré** : brouillon complet (`vars` comprises), catégorie, nom de fichier, BPM, tonalité de contexte, transposition, piste d'origine et mode manuel de la longueur de phrase [SPEC-18.21]. La restauration a lieu **avant** l'initialisation du panneau YAML, qui s'ouvre donc sur le texte restauré. Une entrée corrompue ou partielle est **ignorée, jamais réparée** : repartir d'un état vierge vaut mieux que d'un état à moitié compris. Un échec d'écriture est signalé [SPEC-14.3] — perdre un brouillon en silence est exactement ce qu'on cherche à éviter.
+
+Bénéfice au-delà du symptôme : un F5 involontaire et un plantage coûtaient autant, et n'étaient pas davantage protégés. *Impl. : `Workspace`/`restoreWorkspace`/`saveWorkspace` sous la clé `composer:workspace` dans `composerStore`.*
+
+**[SPEC-18.27] Curseur de lecture et surlignage des sons joués.** Réalise le playhead « façon Strudel » évoqué en [SPEC-15]. Pendant la lecture, l'atelier DOIT montrer **où en est la boucle** et **ce qui sonne**, dans le piano roll et dans le code :
+- **Curseur** : trait vertical à la position de lecture, **bouclant sur la phrase déclarée** — soit toute la largeur dessinée, puisque la vue couvre un seul tour [SPEC-18.26]. Position obtenue par modulo de la phrase, comme la jauge de slot de l'instrument [SPEC-17.10] — les patterns Strudel étant alignés sur la grille de cycles globale, le beat absolu s'y projette directement. C'est ce mouvement qui rend la reprise perceptible, sans avoir à la dessiner deux fois.
+- **Événements** : deux états, **attaque** (éclat vif, ~1/8 de beat) puis **tenue** (maintien atténué jusqu'à la fin). Un événement Strudel occupant toute sa durée [SPEC-18.25], un allumage plein temps donnerait une impression molle et un flash seul serait illisible sur une note tenue.
+- **Code** : les caractères de la mini-notation s'illuminent, à partir des **positions source** que le transpileur attache déjà à chaque événement (`hap.context.locations`, offsets de caractères absolus). Deux propriétés vérifiées, fidèles au REPL officiel : un événement porte l'**ensemble** des atomes qui l'ont produit, éventuellement issus de plusieurs chaînes (`note("c e").s("piano")` → `c` et `piano`), et les arguments d'opérateur comptent (`bd*2` illumine `bd` et `2`). Contrairement au roll, l'attaque **et** la tenue illuminent le texte : un caractère clignotant un huitième de beat serait illisible.
+
+**Le surlignage du code n'est actif que si les positions sont valides**, c'est-à-dire si le code joué est **caractère pour caractère** le texte affiché. L'expansion des `vars` [SPEC-4.7], le retrait d'une couche coupée [SPEC-18.9] et l'enveloppe de transposition [SPEC-18.12] décalent tous les offsets. Le test est une comparaison exacte, jamais une heuristique, et l'indisponibilité est **dite** : un surlignage décalé désignerait les mauvais caractères avec la même assurance, ce qui est pire que pas de surlignage.
+
+**Synchronisation calée sur l'audible.** `scheduler.now()` retranche le tick de requête (`clock.duration`, 0,05 s) mais **pas** la `latency` du scheduler (0,1 s), alors que chaque événement est programmé à `targetTime + latency`. La position brute devance donc le son d'environ 0,1 s — un cinquième de beat à 120 BPM, nettement visible sur un kick. Cet écart DOIT être compensé. `latency` n'étant pas exposée par `repl()`, la valeur est répliquée en constante nommée, à maintenir si Strudel change. *(Écart présent aussi dans le REPL officiel et dans la jauge de l'instrument.)*
+
+L'implémentation n'ajoute **aucune dépendance** : `@strudel/codemirror` est inutilisable sur un `<textarea>` (la limite vient de l'élément, qui ne peut pas styler des plages de caractères), et le `Drawer` de `@strudel/draw` est superflu puisque les temps des événements sont déjà connus. Le surlignage du code impose en revanche un **éditeur à deux calques** : un rendu visible sous un `<textarea>` au texte transparent mais au caret visible, les deux partageant une source unique de métriques (police, taille, interlignage, marges, retour à la ligne) — toute divergence ferait dériver le surlignage des glyphes.
+
+*Impl. : `HapInfo.locations`/`SourceRange` dans `StrudelEngine.queryEvents`, `RollEvent.locations` + `eventPhase`/`phaseWithin`/`FLASH_BEATS` dans `core/composer/roll.ts`, `src/composer/state/playhead.ts` (ticker rAF + `SCHEDULER_LATENCY_S`), `codeEvents`/`codeHighlightable` dans `composerStore`, `.playhead`/`.attack`/`.held` dans `PianoRoll.svelte`, `src/composer/lib/PatternEditor.svelte`.*
+
+**[SPEC-18.26] La vue montre exactement un tour de boucle.** La largeur dessinée DOIT correspondre à la **longueur réelle** de la boucle : une phrase de 4 beats occupe toute la largeur, et le bord droit **est** l'endroit où elle recommence.
+
+Historique de la décision, parce qu'elle a été prise dans les deux sens : la vue s'étendait d'abord sur **deux tours**, pour rendre la reprise visible. Assombrir et nommer le second tour a réduit la confusion sans la supprimer — huit frappes dessinées en face d'un « 4 beats » restent huit frappes à compter, et la moitié grisée occupait la moitié de l'espace horizontal sans rien apprendre. Montrer la seule vraie longueur supprime la contradiction à la source, et le curseur de lecture [SPEC-18.27] rend la reprise **perceptible par le mouvement** plutôt que par duplication.
+
+Restent affichés : une ligne par **beat** avec les mesures marquées [SPEC-18.25], la règle numérotée `1..N`, et les **répétitions internes** plus courtes que la phrase — c'est l'écart qui surprend quand un pattern « joue trop vite ».
+
+Limite assumée, inchangée : la vue étant dérivée de l'interrogation du pattern [SPEC-18.6], deux écritures produisant le même flux d'événements sont indiscernables — `s("bd*8").slow(2)` et `s("bd*4")` donnent les mêmes attaques et la même période, et aucune ne peut être déclarée plus longue que l'autre sans lire le code. *Impl. : `spanCyclesFor()` dans `core/composer/roll.ts` (un tour), règle et grille dans `PianoRoll.svelte`.*
+
+**[SPEC-18.25] Les attaques doivent rester dénombrables.** Un événement Strudel occupe toute sa durée — les quatre frappes de `s("bd*4")` durent un beat chacune et se touchent. Dessinées bord à bord, elles forment un bloc continu : un 4-temps ressemble à une nappe, et l'information qu'on cherche sur une ligne de percussion (combien de frappes, où) disparaît. La durée réelle reste dessinée, mais chaque événement DOIT porter un **repère d'attaque** sur son bord gauche et être séparé du suivant d'un filet. Un fragment sans attaque (queue d'un événement commencé avant la fenêtre) n'en porte pas — c'est ce qui le distingue d'une nouvelle frappe. Le repère de fin de phrase est dessiné **au-dessus** des événements : sous eux il devenait invisible sur une ligne chargée, précisément quand il est utile. *Impl. : `.ev` (bord d'attaque, largeur `calc(… - 2px)`) et `.loopmark` (z-index) dans `PianoRoll.svelte`.*
+
+**[SPEC-18.24] Les messages de condition disparaissent avec leur condition.** Précise [SPEC-14.3], qui exige de tout remonter mais ne dit pas quand cesser. Deux natures de messages, à traiter différemment :
+- un message de **condition** décrit un état courant (« pattern non évaluable », « variable non définie », « champ non modifié — corrigez le YAML ») et DOIT s'effacer **dès que la condition cesse** : corriger une erreur de syntaxe et continuer à lire la plainte à son sujet apprend seulement que l'outil ne regarde plus ;
+- un message d'**événement** relate un fait passé (« enregistrement impossible », « dossier inaccessible ») et DOIT persister jusqu'à lecture — l'effacer masquerait ce qui s'est mal passé.
+
+Les conditions sont donc effacées aux points où elles se résolvent : évaluation réussie du pattern, requête réussie, YAML redevenu valide, pattern vidé. Un message posé par un composant (lecture, isolation) est effacé par la réussite ailleurs, la cause étant la même. *Impl. : `CONDITION_PREFIXES`/`clearConditionError()` appelé dans `commitYaml`, `pushVoice` et `analyse` (`composerStore`).*
+
+**[SPEC-18.23] Deux gestes d'insertion distincts.** Un assistant [SPEC-18.7] produit un **pattern entier** ; le coller comme texte brut à la fin du code existant juxtapose deux expressions et donne une **erreur de syntaxe**. Deux gestes séparés, jamais devinés :
+- **ajouter une couche** (geste par défaut de tous les assistants) : le fragment devient un argument de `stack(...)`. Si le pattern est déjà un `stack(...)` **sans appel chaîné**, le fragment s'ajoute à ses arguments ; sinon le pattern existant est **enveloppé en entier**. Ce dernier cas est obligatoire quand un suffixe est présent : dans `stack(a, b).s("piano")`, ce suffixe s'applique à toutes les couches et un `.s()` postérieur gagne — un son de batterie ajouté comme argument deviendrait silencieusement du piano. L'imbrication coûte un niveau de parenthèses et est le seul résultat correct ; en contrepartie les couches du groupe enveloppé ne sont plus solistes individuellement [SPEC-18.9].
+- **insérer au curseur** : texte brut à la position du curseur, pour placer un fragment **à l'intérieur** du code existant (un nom de son dans un `s("…")`). Exige un curseur que l'utilisateur a réellement posé ; à défaut l'action est **indisponible** et le dit — se replier sur la fin du texte est précisément ce qui produisait du code invalide.
+
+*Impl. : `addLayer()` dans `core/composer/layers.ts`, `addAsLayer`/`insertAtCursor` + `caretKnown` dans `Composer.svelte`, boutons nom / ↳ dans `SoundBrowser.svelte`.*
+
+**[SPEC-18.22] Un assistant à la fois.** Les assistants [SPEC-18.10] NE DOIVENT PAS être empilés verticalement : quatre panneaux dépliables repoussaient le piano roll et les métadonnées hors de l'écran, et un atelier qu'il faut faire défiler pour voir ce qu'il dessine ne remplit pas son office [SPEC-17.2]. Ils sont regroupés derrière une **barre d'onglets**, un seul visible à la fois, aucun par défaut. Exception : l'**aide contextuelle** [SPEC-18.13] reste toujours visible — elle répond à une question qu'on se pose *pendant* la frappe, la masquer derrière un clic la priverait de son intérêt. *Impl. : `TOOLS`/`activeTool` dans `Composer.svelte`.*
+
+**[SPEC-18.21] Longueur de phrase automatique.** Le champ `beats` [SPEC-4.2] est **déduit du pattern** : longueur de phrase **standard la plus petite qui contienne la période mesurée** (4, 8, 16, 32, 64). Corrige [SPEC-18.8], qui interdisait d'écraser le champ : c'est la période **brute** qui ne devait pas y être écrite, pas une valeur musicalement juste. `s("bd*4")` a une période de 1 beat et se déclare sur 4 — cette règle reproduit **les 23 valeurs déclarées de la bibliothèque, sans exception** (vérifié). Un pattern non périodique ne donne aucune valeur : deviner serait pire que de le dire. La déduction a lieu **avant** le calcul de l'étendue affichée, pour que le roll soit dessiné à la longueur qui vient d'être décidée. Saisir une valeur à la main **prend le dessus** jusqu'au chargement d'une autre piste, avec un retour explicite au mode automatique. *Impl. : `phraseBeatsFor()` dans `core/composer/roll.ts`, `beatsIsManual`/`setBeatsManually`/`resumeAutoBeats` dans `composerStore`.*
+
+**[SPEC-18.20] Sons favoris.** Le navigateur de sons [SPEC-18.10] DOIT permettre de **marquer** un son. La banque comptant plus d'un millier d'entrées et un set n'en utilisant qu'une poignée, le marquage transforme un annuaire en **palette**. L'ordre de la liste ne DOIT **pas** dépendre des favoris : remonter un son au moment où on le marque le fait fuir sous le pointeur, et le clic suivant tombe sur un autre son. L'accès rapide passe par un **basculement** qui restreint l'affichage aux seuls favoris — il ne change la liste que lorsqu'on le demande. La sélection est **persistée** entre les sessions [SPEC-13], sous une clé propre à l'atelier. Elle n'entre PAS dans le fichier de piste : un favori décrit une habitude de l'interprète, pas la boucle, et serait du bruit dans un `.track.yaml` [SPEC-4.6]. Un échec d'écriture est signalé — un favori perdu ne se remarque qu'au moment où on en a besoin [SPEC-14.3]. *Impl. : `src/core/composer/bookmarks.ts`, tri et bascule dans `src/composer/lib/SoundBrowser.svelte`.*
+
 **[SPEC-18.11] Démarrage à partir de l'existant.** Créer une piste DOIT pouvoir se faire **à partir d'une piste de la bibliothèque**, qui sert de recette. Réponse directe au problème de la page blanche [SPEC-18.2] : la bibliothèque est déjà un jeu d'exemples fonctionnels.
 
 **[SPEC-18.12] Contexte de jeu.** L'atelier DOIT permettre de fixer le **BPM** et la **tonalité Camelot** d'audition, afin que ce qui est entendu pendant l'écriture corresponde au contexte de destination — la finalité étant de jouer par-dessus un mix externe dont la tonalité est connue [SPEC-17.14].
@@ -467,14 +635,189 @@ Une piste dont le `pattern` n'est pas un `stack()` de premier niveau est traité
 
 **[SPEC-18.15] Écriture dans la bibliothèque.** L'atelier DOIT pouvoir écrire `library/<catégorie>/<slug>.track.yaml` **directement**, via la File System Access API (Chrome, déjà requis pour Web MIDI et WebHID [SPEC-14.1]) : le dossier est autorisé une fois, les enregistrements suivants ne redemandent rien. Contraintes :
 - le **nom de fichier et le dossier déterminent l'identifiant** `catégorie/slug` : renommer ou déplacer **délie les pads** de l'instrument (association conservée et signalée, jamais purgée [SPEC-17.51]). L'atelier DOIT avertir avant un renommage qui change un identifiant existant ;
-- l'écrasement d'une piste existante DOIT être explicite.
+- l'écrasement d'une piste existante DOIT être explicite ;
+- le bouton DOIT **toujours rouvrir le sélecteur**, même quand un dossier est déjà autorisé : court-circuiter sur l'autorisation existante rendait le bouton inopérant et privait l'utilisateur du seul moyen de corriger un mauvais choix ;
+- le dossier retenu DOIT être **contrôlé et le doute signalé**. Le sélecteur du navigateur n'offre aucun contexte et choisir `library/perc` au lieu de `library/` est une erreur naturelle — l'application écrirait alors `perc/<catégorie>/…`, créant un dossier dans un dossier. Deux indices suffisent : la présence de `track.schema.json` atteste la racine ; des fichiers `.track.yaml` **directement** dans le dossier trahissent une **catégorie**, soit un niveau trop bas. L'avertissement est **consultatif**, pas un refus : un dossier de pistes personnel reste une cible légitime.
 
 **[SPEC-18.16] Validation.** Une piste DOIT être validée **avant écriture** contre `library/track.schema.json` — le même schéma que celui utilisé par l'éditeur et par le chargeur [SPEC-4.6] —, et son `pattern` DOIT être évalué au moins une fois sans erreur. Aucun fichier invalide n'est écrit dans la bibliothèque.
 
 **[SPEC-18.17] Cycle atelier → instrument.** Les deux pages étant servies par le même serveur Vite, elles voient la même bibliothèque sur disque et la même banque de sons. Enregistrer dans l'atelier DOIT faire apparaître la piste dans l'instrument sans manipulation : le watcher détecte le fichier et l'instrument se recharge [SPEC-17.31]. Ce cycle est la principale justification du second document plutôt que d'un projet séparé.
+
+### Tonalité d'une suite d'accords
+
+**[SPEC-18.31]** L'outil « Accords » déduit la **tonalité** d'une suite d'accords — le sens inverse
+du générateur de degrés. On ne calcule pas une tonalité, on la déduit, en croisant quatre indices du
+plus faible au plus décisif : les notes employées (qui laissent toujours la paire relative en
+suspens), la **suite des qualités** d'accords (qui ne s'aligne que d'une façon sur le gabarit
+diatonique), la **dominante** (le triton d'une septième de dominante n'a qu'une résolution) et la
+**cadence** avec la position. Le mineur harmonique est admis : en la mineur la dominante est *mi
+majeur*, sans quoi toute cadence authentique en mineur serait comptée hors tonalité.
+
+**[SPEC-18.31.1]** Le verdict porte **toujours** ce qui soutient l'hypothèse ET ce qui la contredit.
+Une hypothèse sans ses réserves serait une affirmation, et c'est précisément ce qu'une déduction
+n'est pas. Sont nommés, jamais résumés ni masqués : les accords qu'aucune lecture n'explique, les
+symboles illisibles ignorés, l'absence de dominante, les lectures concurrentes, et le cas où
+**plusieurs tonalités expliquent tous les accords** — auquel cas le message dit explicitement que
+c'est l'oreille qui tranche, pas le calcul. Quatre niveaux : `certaine`, `probable`, `incertaine`,
+`indéterminée`. Un seul accord, ou aucun accord lisible, donne `indéterminée` avec le motif.
+
+**[SPEC-18.31.2]** Chaque accord reçoit son **rôle** : chiffrage romain s'il est diatonique
+(`I`, `ii`, `V7`), « emprunt » nommé s'il est hors gamme mais explicable (♭III/♭VI/♭VII du mineur
+parallèle, napolitaine, dominante secondaire), « hors tonalité » sinon. Un emprunt n'est pas une
+contradiction : la piste `cmajor-1-4-b6-b7` est faite de ♭VI et ♭VII et reste en do majeur.
+
+**[SPEC-18.31.3]** Deux principes de départage, sans lesquels le barème dérive :
+une lecture qui n'a besoin d'**aucun emprunt** bat toute lecture qui en demande un — sans quoi les
+dominantes secondaires font « expliquer tout » à presque n'importe quelle tonalité, et `C F G C`,
+cas d'école, se voyait affubler de dix concurrentes ; et un **v mineur** sans dominante majeure
+affaiblit le candidat, car il relève du modal et n'attire pas vers la tonique — c'est ce qui fait
+lire `Dm Gm` en i–iv de ré mineur plutôt qu'en v–i de sol mineur. La suite est traitée comme une
+**boucle** : le premier accord, sur lequel elle retombe à chaque tour, compte presque autant que le
+dernier.
+
+**[SPEC-18.31.4]** La **relative** est signalée mais ne compte pas comme une incertitude : elle
+porte le même chiffre Camelot `[SPEC-17.19]`, donc l'ambiguïté la plus coûteuse à lever en solfège
+est sans effet sur ce que l'application transpose.
+
+---
+
+### Reconnaissance d'accords
+
+**[SPEC-18.30]** L'outil « Accords » fonctionne **dans les deux sens**. Le générateur transforme
+des degrés en symboles ; l'inverse est ce dont une session a réellement besoin : un riff recopié
+d'une vidéo arrive en **notes absolues** (`[d3,a3,f4]`), qui ne se transposent pas et que
+`voicing()` ne peut pas réinfléchir `[SPEC-17.48]`. Coller les notes rend le nom (`Dm`) — donc
+rend la musique déplaçable.
+
+**[SPEC-18.30.1]** La lecture des notes accepte ce qu'on colle vraiment : `d3,a3,f4`,
+`[d3,a3,f4]`, `d3 a3 f4`, `note("[…]")`, majuscules, `bb3`, `gs2`. Moins de trois notes, ou un
+jeton qui n'est pas une note, sont **refusés en le disant** — jamais devinés.
+
+**[SPEC-18.30.5]** **Trois zones de saisie**, une par notation, plutôt qu'un champ unique qui
+devinerait : les musiciens ne partagent pas une seule écriture. Un pattern Strudel se lit
+`d3,a3,f4`, une partition française `ré3,la3,fa4`, et un tutoriel dit « la 1, la 3 et la 5 ».
+Séparer les champs rend les trois **visibles** au lieu de découvrables. Chaque champ est
+**strict** — mais un nom appartenant à l'autre alphabet est reconnu comme tel et renvoie vers le
+bon champ, au lieu de prétendre que la note n'existe pas. Les sept noms français sont acceptés
+avec ou sans accent (`ré`/`re`), en majuscules, et l'entrée est normalisée en NFC (un `é` copié
+du web peut arriver décomposé). Les altérations acceptent `#`, `♯`, `s`, `b`, `♭`, `f` : `sib3`,
+`sol#`, `mib`. La sortie est **toujours** l'orthographe anglaise, seule que `chord()` accepte —
+le français est une commodité d'entrée, jamais une valeur qui entre dans le pattern.
+
+**[SPEC-18.30.11]** Chaque lecture porte un bouton **🎹 écouter**. Lire `D3 F3 A3` donne les notes ;
+entendre l'accord dit s'il s'agit du bon — et deux lectures d'un même ensemble (`FM` et `Am#5` pour
+fa-la-do) diffèrent par un voicing que personne ne juge sur le papier. C'est une frappe **unique**,
+via le mécanisme d'audition existant `[SPEC-18.10]` : slot dédié, jamais celui de la boucle en cours
+d'écriture, et voix relâchée juste après. Le bouton s'allume pendant que ça sonne, sans quoi, avec
+deux lectures à un clic d'écart, on ne sait plus laquelle on vient d'entendre. Le son est
+**`gm_piano`** — ses presets sont sur le disque `[SPEC-17.55]`, donc l'audition ne dépend d'aucun
+réseau ; repli sur la banque `piano` si l'import GM n'a pas été fait, plutôt qu'une audition muette.
+
+**[SPEC-18.30.10]** La lecture dépend de la **gamme**, pas seulement du texte : changer de tonalité
+ou d'épellation ♯/♭ **recalcule** le résultat. Sans quoi le panneau continuait d'afficher une réponse
+pour une tonalité qui n'était plus sélectionnée, et la seule issue était de retaper quelque chose
+dans un champ. Selon le champ actif, l'effet diffère et les deux sont voulus : avec un champ de
+notes actif, seuls les degrés miroir changent (`1,5,10` en ré mineur devient `2,6,11` en do majeur —
+mêmes notes, autre gamme) ; avec le champ des degrés actif, ce sont les **notes** qui changent, donc
+l'accord (`1,3,5` passe de `Dm` à `CM`).
+
+**[SPEC-18.30.9]** Les évaluations de la sonde sont **spéculatives** : leurs échecs ne sont pas
+remontés à l'utilisateur. Chercher l'orthographe qu'accepte Strudel suppose d'essayer des symboles
+qui échouent — mais Strudel diffuse chaque erreur d'évaluation sur `strudel.log`, que la capture
+`[SPEC-17.57]` transformait en toast. Taper `1,3,5` dans le champ des degrés faisait donc surgir
+« [eval] error: Invalid argument », et un jeu de quatre candidats en produisait sept. Deux mesures :
+les orthographes dont l'échec est **certain** ne sont plus essayées du tout — les accords barrés
+lèvent tous, et les alias typographiques (`C°`, `CΔ`, `Cø`) sont refusés par l'analyseur de
+**mini-notation**, donc ne peuvent jamais marcher (chaque type possède un alias ASCII qui, lui,
+fonctionne) — et le reste est évalué en **mode silencieux**. Mesuré après correction : 0 message
+émis sur les cinq cas de référence, et une vraie erreur hors sonde reste affichée.
+
+**[SPEC-18.30.8]** Chaque lecture affiche le symbole **et son nom français** : `CM7` · « DO
+majeur 7 », `Gm` · « SOL mineur », `Bb` · « SI♭ majeur ». Le symbole reste anglais — c'est le seul
+que `chord()` accepte et il part tel quel dans le pattern — mais `Dm` ne dit pas à tout le monde de
+quel accord il s'agit. La traduction est indexée sur le **type canonique** de tonal, pas sur le
+suffixe, de sorte que tous les alias d'un même accord (`maj7`, `M7`, `Δ`, `^7`) donnent la même
+lecture. Une qualité non traduite garde son suffixe **tel quel** (`Cadd9` → « DO add9 ») : une
+étiquette à moitié traduite est honnête, une étiquette inventée non.
+
+**[SPEC-18.30.7]** Une saisie dans un champ est **retranscrite dans les deux autres** : les trois
+montrent la même chose, chacun dans son écriture. Retaper `ré3,la3,fa4` après `d3,a3,f4` n'apprend
+rien ; voir la traduction apparaître, si. Les champs recopiés sont **grisés en pointillés** — écrits
+par l'outil, pas saisis — et restent modifiables : y taper les rend simplement actifs. Une note
+hors gamme est écrite en **degré altéré** (`#3` pour le fa♯ d'un ré majeur en ré mineur) ; quand
+aucun degré n'approche à un demi-ton près, ou que la note sort de l'empan de deux octaves, le champ
+degrés reste **vide** plutôt que de mentir. Une note chromatique se lisant des deux façons (`#2`
+ou `b3`), c'est le sélecteur ♯/♭ déjà présent qui tranche.
+
+**[SPEC-18.30.6]** Le champ **degrés** lit des chiffres dans la gamme du sélecteur de tonalité,
+qui est nommée à l'écran (« degrés lus dans 7A · RÉ mineur ») : trois nombres sans contexte ne
+veulent rien dire. Les degrés **montent** : `1,5,10` donne le voicing large `D3 A3 F4` du riff
+d'origine au lieu d'empiler trois notes dans une octave — l'identité de l'accord survit aux deux,
+ce qu'on entend non. Au-delà de 7 on continue dans l'octave suivante (8 = tonique à l'octave),
+jusqu'à 14 ; `b3` et `#4` altèrent un degré, parce que c'est ainsi que s'écrivent les notes
+empruntées. Un degré qui **descend** sous le précédent est refusé : il deviendrait silencieusement
+la basse et changerait le nom rendu.
+
+**[SPEC-18.30.2]** La dénomination est déléguée à `tonal` (`@tonaljs/chord-detect`), la famille
+sur laquelle Strudel s'appuie déjà. **Que Strudel accepte le symbole est une autre question**, et
+elle est posée à Strudel : chaque orthographe est essayée par `queryEvents` et retenue seulement
+si elle sonne les hauteurs collées. Mesuré sur Strudel 1.2.6, un symbole cache quatre réponses :
+les accords barrés (`Gm/D`, `C/E`) **lèvent** « Invalid argument » ; `.dict("triads")` ne produit
+**rien** dès que l'accord n'est pas une triade (`Dm7`, `G7`, `C6`, `Cadd9`) ; plusieurs noms
+courants ne passent que sous un **alias** (`Cmaj7` ✗ / `CM7` ✓, `Cdim` ✗ / `Co` ✓, `Csus4` ✗ /
+`Csus` ✓, `Cdim7` ✗ / `Co7` ✓) ; et un dictionnaire peut **accepter un symbole en jouant autre
+chose** (`Caug` sous `triads` sonne Mi♭ La♭ Do, pas Do Mi Sol♯). Une table codée en dur
+vieillirait au premier changement de dictionnaire, et l'échec serait de nouveau du silence
+`[SPEC-14.3]`.
+
+**[SPEC-18.30.3]** Une orthographe est retenue si les hauteurs produites sont celles collées,
+**exactement ou en sous-ensemble sans note étrangère**. Le second cas est réel et ne doit pas être
+refusé : Strudel voice `Dm7` en ré-fa-do, sans la quinte, comme le ferait un pianiste. Les notes
+omises sont alors **nommées** ; un voicing qui perd une note en silence est ce qu'on découvre sur
+scène. Une orthographe complète l'emporte toujours sur une incomplète.
+
+**[SPEC-18.30.4]** Un **renversement** est proposé comme l'accord de base plus une **couche de
+basse** (`stack(chord(…).voicing(), note("d3"))`), seule façon de le garder dans Strudel. La basse
+est un `note(...)` simple et non `rootNotes().note()` : ce dernier emboîte ses valeurs dans un
+second objet `{note}`, et `.add(note(n))` — exactement ce que fait la transposition de tonalité de
+Strudler — ne rend alors plus rien du tout.
+
+---
 
 ### Limites
 
 **[SPEC-18.18] Contrôleurs matériels : hors périmètre initial.** L'atelier est piloté **souris/clavier**. Si les deux pages sont ouvertes simultanément, elles ouvrent les mêmes ports MIDI : les entrées se partagent, mais les **sorties LED entreraient en conflit** (deux pages écrivant l'état des pads). Piloter la grille de batterie depuis l'APC reste envisageable, mais suppose de traiter d'abord cette exclusivité.
 
 **[SPEC-18.19] Hors périmètre.** Ne relèvent PAS de l'atelier : un IDE Strudel généraliste ; un parseur de code Strudel arbitraire [SPEC-18.6] ; une ré-implémentation du live-coding, déjà couverte par le mode avancé de l'instrument [SPEC-9.2] ; l'arrangement d'un morceau complet [SPEC-15].
+
+---
+
+## [SPEC-19] Sortie scénique — diffuser le jeu vers d'autres applications
+
+**[SPEC-19.1] Intention.** Strudler **sait** ce qu'il joue : tempo, position dans la mesure et la phrase, et chaque frappe **avant** qu'elle soit audible (le séquenceur Strudel s'engage sur les événements en avance). Un logiciel lumière ou un moteur visuel n'a donc aucun besoin d'analyse spectrale : il suffit de le lui dire. Strudler **émet** ces informations et rien de plus — le rendu (visuels, DMX) appartient aux applications réceptrices, l'instrument ne s'alourdit pas d'un moteur graphique.
+
+**[SPEC-19.2] Contrainte structurante.** Un navigateur ne peut **ni émettre de l'UDP, ni écouter sur un port**. Les deux transports retenus s'en déduisent : **MIDI** (natif, Web MIDI) et **WebSocket en client** (le récepteur est le serveur). Sont donc hors de ce périmètre, faute d'être atteignables sans pont : OSC, Art-Net/sACN, Ableton Link. Chacun resterait un **simple puits supplémentaire** derrière le même bus, un pont UDP dans `vite-plugins/` (modèle `soundsServer.ts`) suffisant le jour où c'est utile.
+
+**[SPEC-19.3] Architecture : un producteur, des puits.** Les événements sont normalisés en **cues** par un bus unique (`core/cues/CueBus`), auquel se branchent des **puits** indépendants, **éteints par défaut**. Sans puits actif, aucun coût : le bus abandonne l'émission et le hook du moteur rend la main immédiatement. Un puits qui échoue n'affecte ni les autres ni l'audio, et son erreur est **remontée visiblement** [SPEC-14.3]. `core/cues/` n'importe ni UI ni store ; le câblage vit dans `stores/cuesStore.ts`, qui **lit** l'état existant plutôt que d'exiger que le reste de l'app lui rende compte (aucune modification de `rackStore`).
+
+**[SPEC-19.4] Origine des événements : le canal est déjà tagué.** Chaque voix reçoit `.orbit(canal + 1)` pour ses bus d'effets [SPEC-17.37] : l'`orbit` porté par tout événement joué **identifie donc le canal**, sans rien instrumenter, et le canal donne sa catégorie. Le point de captation est le `defaultOutput` passé au `repl()` de Strudel, **enrobé** : l'audio est déclenché d'abord et sa promesse retournée intacte, les observateurs sont notifiés ensuite, leurs exceptions attrapées et republiées. Aucun patch de Strudel, aucune dépendance ajoutée.
+
+**[SPEC-19.5] Le temps est la valeur ajoutée.** Chaque cue porte `t` (instant d'émission) et, pour les événements datés, `at` = l'instant où l'événement **doit** se produire. Pour un `onset`, `at` est **dans le futur** : mesuré, l'écart est de l'ordre de **+300 ms** à 120 BPM. Un récepteur peut donc **attendre** `at − maintenant` pour être calé, ou **anticiper** un fondu avant la frappe. Un `beat`, lui, est **constaté** (≈ −10 ms) : il est détecté au franchissement, pas prédit.
+
+La conversion horloge audio → temps epoch passe par `AudioContext.getOutputTimestamp()`, relue à chaque appel (les deux horloges dérivent). ⚠ L'instant d'attaque est le **5ᵉ** argument du `defaultOutput` (`targetTime`, latence incluse) : le 4ᵉ, `deadline`, est un **délai relatif** (`targetTime − phase` dans le Cyclist, conservé par compatibilité) et le prendre pour un instant absolu produit un `at` qui dérive d'un beat par beat.
+
+Côté MIDI, la même avance est exploitée par l'horodatage de `MIDIOutput.send()` : les messages sont **programmés** à leur instant exact au lieu d'être émis au gré du minuteur JS.
+
+**[SPEC-19.10] Onglet en arrière-plan.** Chrome ralentit `requestAnimationFrame` à ~1 Hz dans un onglet non visible, or les cues `beat` en sont dérivés. Deux parades : les beats franchis pendant un trou sont **tous** émis au retour (au plus deux mesures de rattrapage, un récepteur n'ayant rien à faire de cent beats d'un coup), et l'horloge MIDI est **programmée ~1,2 s à l'avance** — Web MIDI émet un message horodaté même si JS ne tourne pas, ce qui couvre le ralentissement sans que l'horloge ne s'interrompe.
+
+**[SPEC-19.11] Boucle de port.** Si le port de sortie est aussi visible en **entrée** (cas du bus IAC de macOS), les cues MIDI réapparaissent dans le moniteur MIDI de Strudler. Ils y sont marqués « appareil non reconnu » et **n'y déclenchent rien** — le mapping résout les contrôleurs par nom de port [SPEC-6.5] — mais c'est utile à savoir : c'est aussi le moyen le plus simple de **vérifier** la sortie sans logiciel tiers.
+
+**[SPEC-19.6] Cues.** `tempo` (bpm, beats/mesure) · `transport` (lecture, beat) · `beat` (beat absolu, mesure, temps dans la mesure, fenêtre de quantisation et position dedans, `at`) · `onset` (canal, catégorie, son, note, gain tel que joué, `at`) · `slot` (canal, catégorie, slot, armé, piste). Les scènes et les effets tenus (DROP, gate, filtre) suivront par le même chemin. Un beat n'est émis que transport en lecture, et son `at` est **recalculé** depuis la position fractionnaire : la frame d'animation peut avoir jusqu'à ~16 ms de retard, ce qui se voit sur une lumière.
+
+**[SPEC-19.7] Sortie MIDI (QLC+, Resolume, VDMX…).** **Horloge MIDI à 24 ppqn** (1 beat = 1 noire) + **Start / Stop / Song Position Pointer** (SPP en doubles-croches, 14 bits), la grille de ticks étant **réancrée à chaque beat** sur l'horloge audio pour ne jamais dériver de ce qui est entendu. Une **note par catégorie** (vélocité = gain), suivant la numérotation batterie General MIDI pour rester familière en « MIDI learn » : `kick 36, snare 38, hats 42, perc/clap 39, bass 48, lead 50, chords 52, pad 53` ; catégorie inconnue → note de repli **signalée une fois**. Le **port de sortie est distinct** de celui des contrôleurs (réglage par sous-chaîne, défaut `IAC`) pour que le trafic de cues ne perturbe jamais le retour LED [SPEC-6.4]. Éteindre la sortie envoie un **Stop** : un récepteur ne doit pas rester à courir derrière une horloge morte.
+
+**[SPEC-19.8] Sortie WebSocket (application maison).** Un objet JSON par cue, préfixé de sa version de protocole (`v`), plus un `hello` à l'ouverture portant l'état courant (tempo, transport, canaux et catégories) pour qu'un récepteur arrivé en retard soit immédiatement synchrone. **Reconnexion automatique** tant que la sortie est active — un récepteur redémarré ne doit pas coûter le reste du set — avec état et message d'erreur **affichés** ; les cues émis socket fermée sont **comptés**, pas ignorés en silence. `scripts/cue-monitor.mjs` (`npm run cues:monitor`) est le **récepteur de référence** : serveur WebSocket sans dépendance, il affiche le flux et l'avance mesurée, et sert de squelette à l'application réceptrice.
+
+**[SPEC-19.9] Réglages.** Sortie MIDI (on/off, port, canal) et sortie WebSocket (on/off, URL) vivent dans la modale MIDI/Session — aucune page, aucun encombrement de la surface de jeu [SPEC-17.2] — et sont **persistés** (clé `cues`).
+
+*Impl. : `src/core/cues/` (`types.ts`, `CueBus.ts`, `MidiCueOut.ts`, `WsCueOut.ts`), `src/stores/cuesStore.ts`, `StrudelEngine.onTrigger`/`onTriggerError`/`audioTimeToEpochMs` + `defaultOutput` enrobé, `MidiService.sendAt`, section « Sortie scénique » de `SettingsModal.svelte`, `scripts/cue-monitor.mjs`, script `cues:monitor`.*

@@ -11,8 +11,12 @@ export interface TrackDefinition {
   name: string;
   /** Loop length in beats (declared metadata, not encoded in the filename). */
   beats: Beats;
-  /** The loop itself, as Strudel code. [SPEC-3.1] */
+  /** The loop itself, as Strudel code, `${VAR}` already substituted. [SPEC-3.1] */
   pattern: string;
+  /** `pattern` exactly as written in the file, `${VAR}` intact. [SPEC-4.7] */
+  patternSource: string;
+  /** Reusable fragments substituted into the pattern. [SPEC-4.7] */
+  vars: Record<string, string>;
   /** Optional search/filter tags. */
   tags?: string[];
   /** Optional base relative level. [PLAN C.1] */
@@ -40,9 +44,13 @@ export interface TrackManifestEntry {
   path: string;
 }
 
-/** A fully loaded track: manifest metadata + its pattern code. */
+/** A fully loaded track: manifest metadata + its pattern code.
+ *  `patternSource`/`vars` preserve what the file says, so an editor can round-trip
+ *  it without inlining the reusable fragments. [SPEC-4.7, SPEC-18.14] */
 export interface LoadedTrack extends TrackManifestEntry {
   pattern: string;
+  patternSource: string;
+  vars: Record<string, string>;
 }
 
 /** A file that failed to load or validate — surfaced to the user, never hidden. [SPEC-14.3] */

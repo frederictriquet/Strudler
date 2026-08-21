@@ -1,0 +1,6 @@
+name: bass bzz
+beats: 4
+key: 5A
+pattern: |-
+  n("0*16").scale("C:minor").transpose(-12).sound("sawtooth")
+    .lpf(sequence(perlin.range(200, 400),perlin.range(300, 500),perlin.range(400, 800), perlin.range(700,1200)).fast(4))

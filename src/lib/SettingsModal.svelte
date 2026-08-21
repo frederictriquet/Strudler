@@ -2,8 +2,25 @@
   // Modal grouping the rarely-used MIDI and Session panels, off the main surface.
   import MidiPanel from '@lib/MidiPanel.svelte';
   import SessionPanel from '@lib/SessionPanel.svelte';
+  import BackupPanel from '@lib/BackupPanel.svelte';
   import { closeSettings } from '@stores/uiStore';
   import { showSlotProgress, setShowSlotProgress } from '@stores/rackStore';
+  import {
+    cueMidiEnabled,
+    cueWsEnabled,
+    cuePortMatch,
+    cueMidiChannel,
+    cueWsUrl,
+    cueWsState,
+    cueWsError,
+    cueCount,
+    setCueMidiEnabled,
+    setCueWsEnabled,
+    setCuePortMatch,
+    setCueMidiChannel,
+    setCueWsUrl,
+  } from '@stores/cuesStore';
+  import { CATEGORY_NOTES, PPQN } from '@core/cues/MidiCueOut';
   import {
     streamDeckSupported,
     streamDeckStatus,
@@ -13,6 +30,23 @@
   } from '@stores/streamdeckStore';
 
   const progress = showSlotProgress;
+  const cueMidi = cueMidiEnabled;
+  const cueWs = cueWsEnabled;
+  const cuePort = cuePortMatch;
+  const cueChannel = cueMidiChannel;
+  const cueUrl = cueWsUrl;
+  const cueState = cueWsState;
+  const cueError = cueWsError;
+  const cueSent = cueCount;
+
+  const CUE_NOTES = Object.entries(CATEGORY_NOTES);
+
+  const WS_LABELS: Record<string, string> = {
+    idle: 'éteint',
+    connecting: 'connexion…',
+    open: 'connecté',
+    error: 'erreur',
+  };
   const sdStatus = streamDeckStatus;
   const sdError = streamDeckError;
 
@@ -28,7 +62,7 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<div class="wrap" role="dialog" aria-modal="true" aria-label="MIDI et Session">
+<div class="wrap" role="dialog" aria-modal="true" aria-label="MIDI, Session et Sauvegarde">
   <button class="backdrop" onclick={closeSettings} aria-label="Fermer"></button>
   <div class="modal">
     <div class="modal-head">
@@ -70,8 +104,79 @@
         {/if}
       </section>
 
+      <!-- Stage output: Strudler tells another app what it plays. [SPEC-19] -->
+      <section class="panel">
+        <h2>Sortie scénique — tempo &amp; frappes</h2>
+        <p class="note">
+          Strudler sait ce qu'il joue : aucune analyse audio n'est nécessaire côté récepteur, et les
+          frappes sont annoncées <strong>avant</strong> d'être audibles (le séquenceur travaille en
+          avance), de quoi anticiper un fondu. Les deux sorties sont indépendantes et n'émettent rien
+          tant qu'elles sont éteintes.
+        </p>
+
+        <div class="slots-row sd-row">
+          <span class="slabel">MIDI (QLC+, Resolume…)</span>
+          <button class:on={$cueMidi} onclick={() => setCueMidiEnabled(!$cueMidi)}>
+            {$cueMidi ? '✓ Activée' : 'Éteinte'}
+          </button>
+          <label class="cue-field">
+            port
+            <input
+              type="text"
+              value={$cuePort}
+              oninput={(e) => setCuePortMatch((e.currentTarget as HTMLInputElement).value)}
+              size="10"
+              aria-label="Port MIDI de sortie (sous-chaîne du nom)"
+            />
+          </label>
+          <label class="cue-field">
+            canal
+            <input
+              type="number"
+              min="1"
+              max="16"
+              value={$cueChannel}
+              oninput={(e) => setCueMidiChannel(Number((e.currentTarget as HTMLInputElement).value))}
+              aria-label="Canal MIDI des notes de frappe"
+            />
+          </label>
+        </div>
+        <p class="note">
+          Horloge MIDI à {PPQN} ppqn + Start/Stop/SPP, et une note par catégorie (vélocité = gain) :
+          {#each CUE_NOTES as [category, note], i (category)}{i > 0 ? ' · ' : ''}{category}
+            {note}{/each}. Le port est reconnu par <em>sous-chaîne</em> de son nom, distinct de celui
+          des contrôleurs pour ne pas perturber les LED — sur macOS, active le bus IAC dans
+          « Configuration audio et MIDI ».
+        </p>
+
+        <div class="slots-row sd-row">
+          <span class="slabel">WebSocket (application maison)</span>
+          <button class:on={$cueWs} onclick={() => setCueWsEnabled(!$cueWs)}>
+            {$cueWs ? '✓ Activée' : 'Éteinte'}
+          </button>
+          <label class="cue-field">
+            URL
+            <input
+              type="text"
+              value={$cueUrl}
+              onchange={(e) => setCueWsUrl((e.currentTarget as HTMLInputElement).value)}
+              size="22"
+              aria-label="URL du récepteur WebSocket"
+            />
+          </label>
+          <span class="sd-status">{WS_LABELS[$cueState] ?? $cueState}</span>
+        </div>
+        {#if $cueError}<p class="sd-error">{$cueError}</p>{/if}
+        <p class="note">
+          Le récepteur est le serveur (un navigateur ne peut pas écouter sur un port).
+          <code>npm run cues:monitor</code> lance un récepteur de référence qui affiche le flux et
+          sert de squelette. Cues émis depuis le démarrage : {$cueSent}.
+        </p>
+      </section>
+
       <MidiPanel />
       <SessionPanel />
+      <BackupPanel />
     </div>
   </div>
 </div>
@@ -164,6 +269,19 @@
   }
   .sd-status {
     color: var(--muted);
+    font-size: 0.78rem;
+  }
+  .cue-field {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+  .cue-field input[type='number'] {
+    width: 3.5rem;
+  }
+  .note code {
     font-size: 0.78rem;
   }
   .sd-error {

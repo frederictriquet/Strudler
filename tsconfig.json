@@ -16,7 +16,8 @@
     "paths": {
       "@core/*": ["src/core/*"],
       "@stores/*": ["src/stores/*"],
-      "@lib/*": ["src/lib/*"]
+      "@lib/*": ["src/lib/*"],
+      "@composer/*": ["src/composer/*"]
     },
     "types": ["svelte", "vite/client", "webmidi"],
     "lib": ["ESNext", "DOM", "DOM.Iterable", "WebWorker"]

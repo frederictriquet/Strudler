@@ -20,6 +20,9 @@ const MIME: Record<string, string> = {
   '.aif': 'audio/aiff',
   '.aiff': 'audio/aiff',
   '.m4a': 'audio/mp4',
+  // General MIDI presets (webaudiofont) are JavaScript files carrying base64
+  // samples; @strudel/soundfonts fetches them as text. [SPEC-17.55]
+  '.js': 'text/javascript',
 };
 
 export function soundsDir(): string {
@@ -110,6 +113,15 @@ function middleware(root: string): Connect.NextHandleFunction {
     }
     if (url.startsWith('/sounds/')) {
       if (serveFile(root, url, res)) return;
+      // `/sounds/` is this server's namespace: a missing file must be a 404, not
+      // a fall-through. Vite's HTML fallback answers 200 with index.html, which
+      // superdough would then try to decode as audio and @strudel/soundfonts as a
+      // preset — an obscure failure instead of a plain «not found». It also let a
+      // presence probe conclude that an empty folder was populated. [SPEC-14.3]
+      res.statusCode = 404;
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.end('introuvable');
+      return;
     }
     next();
   };

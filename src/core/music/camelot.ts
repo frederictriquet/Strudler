@@ -117,12 +117,21 @@ const SOLFEGE: Record<string, string> = {
   B: 'SI',
 };
 
-/** French root, e.g. "la♭", "do♯", "fa". */
+/**
+ * French name of a bare root, e.g. `Bb` → "SI♭", `G#` → "SOL♯", `F` → "FA".
+ * Accidentals become symbols; several of them are kept (`Bbb` → "SI♭♭").
+ */
+export function frenchNoteName(root: string): string {
+  const base = SOLFEGE[root[0]?.toUpperCase()] ?? root[0] ?? '';
+  const accidentals = [...root.slice(1)]
+    .map((a) => (a === '#' ? '♯' : a === 'b' ? '♭' : ''))
+    .join('');
+  return base + accidentals;
+}
+
+/** French root of a key, e.g. "LA♭", "DO♯", "FA". */
 export function frenchRoot(k: CamelotKey): string {
-  const base = SOLFEGE[k.root[0]] ?? k.root[0];
-  const acc = k.root.slice(1);
-  const symbol = acc === '#' ? '♯' : acc === 'b' ? '♭' : '';
-  return base + symbol;
+  return frenchNoteName(k.root);
 }
 
 /** Short French note label, e.g. "lam" (minor) or "do" (major). */

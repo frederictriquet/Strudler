@@ -324,6 +324,11 @@
       <button class="settings" onclick={openSettings} title="Contrôleurs MIDI & sessions">
         🎛 MIDI / Session
       </button>
+      <!-- Separate document on purpose: its own AudioContext, and out of reach of
+           a stray click during a set. [SPEC-18.3] -->
+      <a class="workshop" href="/composer.html" title="Atelier de composition (autre page)">
+        ✎ Atelier
+      </a>
     </div>
   </div>
 
@@ -408,6 +413,23 @@
   }
   .adv.on,
   .settings:hover {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+  }
+  /* Styled like the buttons beside it, but a real link: the workshop is another
+     document, not a view of this app. [SPEC-18.3] */
+  .workshop {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.8rem;
+    padding: 0.3rem 0.7rem;
+    color: var(--muted);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    text-decoration: none;
+  }
+  .workshop:hover {
     color: var(--accent);
     border-color: var(--accent-dim);
   }

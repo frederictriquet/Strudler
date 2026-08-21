@@ -486,6 +486,13 @@ export function setEchoHold(beats: number, on: boolean): void {
   echoActive.update((map) => ({ ...map, [beats]: on }));
 }
 
+/** Forget every held echo. Called on STOP, where the engine silences the lines
+ *  [SPEC-17.47]: leaving the keys lit would claim an effect that is no longer
+ *  running, and the Stream Deck would show it. */
+function clearEchoHolds(): void {
+  echoActive.set({});
+}
+
 // --- Scenes / snapshots (Stream Deck row 1: M+ then 4 slots) [SPEC-17.36] ---
 //
 // A scene is the set of armed slots. Storing is deliberately behind a mode ("M+")
@@ -747,6 +754,7 @@ export async function startTransport(): Promise<void> {
 
 export function stopTransport(): void {
   engine.stopTransport(); // pause scheduler, keep armed voices → resumable
+  clearEchoHolds();
   transportRunning.set(false);
   timerFreeze();
 }
@@ -754,6 +762,7 @@ export function stopTransport(): void {
 /** Hard stop: silence + clear the whole armed set (used by session stop). */
 export function stopAll(): void {
   rack.stopAll();
+  clearEchoHolds();
   transportRunning.set(false);
   timerFreeze();
 }
@@ -950,6 +959,7 @@ export async function startReplay(session: Session | null = sessionData): Promis
 export function stopReplay(): void {
   finishReplay();
   rack.stopAll();
+  clearEchoHolds();
 }
 
 /** Internal: stop scheduling further events. A natural end keeps the sound. */

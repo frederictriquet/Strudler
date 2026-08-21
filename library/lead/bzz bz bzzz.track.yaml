@@ -1,0 +1,8 @@
+name: bzz bz bzzz
+beats: 4
+key: 7A
+pattern: |-
+  stack(
+   // n("0*8").scale("D:minor").mask("<1 1 0 1 0 0 1 0>*8").transpose(-12).sound("sawtooth").legato(1.1).gain("[0.2 0.9]".fast(4)), // fake a sidechain on the kick
+   n("0*8").scale("D:minor").mask("<1 1 0 1 0 0 1 1 1 1 0 1 0 0 1 1>*8").transpose(-12).sound("sawtooth").legato(1.1).gain("[0.2 0.9]".fast(4))
+    )

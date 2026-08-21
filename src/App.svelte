@@ -22,7 +22,9 @@
   import { loadErrors } from '@stores/libraryStore';
   import { loadDefaultSamples } from '@stores/samplesStore';
   import { connectMidi } from '@stores/midiStore';
+  import { initCueOutputs } from '@stores/cuesStore';
   import { reconnectStreamDeck } from '@stores/streamdeckStore';
+  import { initBackup } from '@stores/backupStore';
 
   const advanced = advancedMode;
   const persist = persistError;
@@ -34,7 +36,9 @@
     armEngine(); // arm audio unlock BEFORE any click (resolves on the next mousedown)
     checkAudioUnlock(); // audio still locked → blocking unlock modal [SPEC-17.50]
     initMidiDispatch(); // route MIDI input → intents (works once MIDI connects)
+    initCueOutputs(); // stage output: produce cues (sinks stay off unless enabled) [SPEC-19]
     initLogCapture(); // surface Strudel warnings (e.g. missing samples) [SPEC-14.3]
+    initBackup(); // mirror every write to disk, and announce a restore [SPEC-13.5]
 
     // Tracks are hand-written YAML data since [SPEC-4.6]: nothing catches a typo
     // at build time any more, so a rejected track must be impossible to miss —

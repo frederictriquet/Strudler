@@ -3,6 +3,7 @@
 // console.
 
 import { writable } from 'svelte/store';
+import { isEvalQuiet } from '@core/engine/evalNoise';
 
 export type NoticeLevel = 'info' | 'success' | 'warn' | 'error';
 
@@ -66,6 +67,9 @@ export function initLogCapture(): void {
   document.addEventListener('strudel.log', (event: Event) => {
     const message = (event as CustomEvent).detail?.message as string | undefined;
     if (!message) return;
+    // A speculative evaluation fails on purpose; reporting it would accuse the
+    // user of an error the app chose to make. [SPEC-18.30.9]
+    if (isEvalQuiet()) return;
     if (/not found|not loaded|error/i.test(message)) notify('warn', message);
   });
 }

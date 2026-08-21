@@ -8,7 +8,7 @@
 
 import { engine } from '@core/engine/StrudelEngine';
 import { library } from '@core/library/Library';
-import { DEFAULT_CHANNEL_GAIN } from '@core/engine/StrudelEngine';
+import { DEFAULT_CHANNEL_GAIN, NEUTRAL_FILTER } from '@core/engine/StrudelEngine';
 import { transposeSemitones } from '@core/music/camelot';
 import {
   DEFAULT_SLOTS_PER_CHANNEL,
@@ -18,7 +18,6 @@ import {
   coerceEffects,
   coerceFxFocus,
   isMissingTrack,
-  FX_HEAVY,
   type ChannelState,
   type SlotState,
   type FxKind,
@@ -207,8 +206,16 @@ export class ChannelRack {
   setFilter(channelId: number, value: number): void {
     const ch = this.channels[channelId];
     if (!ch) return;
+    const before = ch.filter;
     ch.filter = Math.min(1, Math.max(0, value));
     engine.setChannelFilter(channelId, ch.filter);
+    // Crossing the neutral point engages or releases the channel filter, which is
+    // now conditionally present in the chain [SPEC-17.53]. Only a crossing needs a
+    // re-evaluation — sweeping within one half stays live through the ref.
+    const sideOf = (v: number): number => Math.sign(v - NEUTRAL_FILTER);
+    if (sideOf(before) !== sideOf(ch.filter) && engine.isStarted) {
+      void this.rebuildChannelVoices(channelId);
+    }
     this.emit();
   }
 
@@ -283,11 +290,11 @@ export class ChannelRack {
     ch.fxFocus = effect;
     engine.setChannelEffects(channelId, ch.effects);
     this.emit();
-    // Heavy effects are conditionally present in the chain → rebuild this
-    // channel's playing voices so they pick it up. [SPEC-17.28]
-    if (FX_HEAVY.has(effect) && engine.isStarted) {
-      void this.rebuildChannelVoices(channelId);
-    }
+    // Every effect is now conditionally present in the chain — the light ones so
+    // they stop overriding what the track wrote [SPEC-17.53], the heavy ones so
+    // they cost nothing while off [SPEC-17.28]. Either way the chain's SHAPE
+    // changed, so this channel's playing voices must be re-evaluated.
+    if (engine.isStarted) void this.rebuildChannelVoices(channelId);
   }
 
   /** Re-evaluate the playing voices of one channel (used when its chain shape

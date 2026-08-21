@@ -14,6 +14,6 @@ vars:
 pattern: |-
   stack(
     chord("${PROGRESSION}").dict("triads").anchor("c4").voicing(),
-    chord("${PROGRESSION}").rootNotes(2).note()
+    chord("${PROGRESSION}").rootNotes(2)
   ).s("piano").gain(0.7).room(0.25)
 tags: [house, chords, piano, g#-minor, uplifting]

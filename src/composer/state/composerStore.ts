@@ -11,6 +11,8 @@
 
 import { derived, get, writable } from 'svelte/store';
 import { engine } from '@core/engine/StrudelEngine';
+import { areBanksRegistered, loadAllBanks, soundfontNotice } from '@core/engine/sampleBanks';
+import { notify } from '@stores/logStore';
 import { library } from '@core/library/Library';
 import {
   expandVars,
@@ -19,8 +21,16 @@ import {
   type TrackDraft,
 } from '@core/library/serialize';
 import { validateTrackText, yamlErrorMessage } from '@core/library/validate';
-import { buildRoll, spanCyclesFor, type LayerHaps, type Roll } from '@core/composer/roll';
+import {
+  buildRoll,
+  phraseBeatsFor,
+  spanCyclesFor,
+  type LayerHaps,
+  type Roll,
+  type RollEvent,
+} from '@core/composer/roll';
 import { layerAlone, layersOf, patternForEnabled } from '@core/composer/layers';
+import { startPlayhead, stopPlayhead } from '@composer/state/playhead';
 import {
   chooseFolder,
   isSupported,
@@ -29,9 +39,9 @@ import {
   writeTrack,
 } from '@core/composer/libraryFolder';
 import { DEFAULT_CAMELOT, transposeSemitones } from '@core/music/camelot';
+import { loadJson, saveJson } from '@core/persist/storage';
 
-/** Same bank the instrument loads, served from ~/Music/Sounds. [SPEC-12.1] */
-const SAMPLE_BANK = '/sounds/strudel.json';
+
 const DEFAULT_BPM = 120;
 const BEATS_PER_CYCLE = 4;
 
@@ -60,10 +70,113 @@ export const contextKey = writable<string>(DEFAULT_CAMELOT);
  *  exactly what the file says. */
 export const followContextKey = writable<boolean>(false);
 
+/** Id of the track this draft was loaded from, to detect a rename. [SPEC-18.15] */
+export const sourceId = writable<string | null>(null);
+
+// --- Work in progress, kept across reloads ([SPEC-18.28]) -------------------
+//
+// Saving a track writes into `library/`, the dev server's watcher sees it and the
+// page RELOADS — the library index is a singleton the instrument's rack holds a
+// reference to, so a hot swap would run two copies [SPEC-17.31]. Correct there,
+// destructive here: the workshop lost whatever was being written, at the very
+// moment of a successful save.
+//
+// Rather than weaken the guard, the workspace is restored. That also covers a
+// stray F5 and a crash, which cost just as much and were never protected.
+
+const WORKSPACE_KEY = 'composer:workspace';
+const WORKSPACE_DEBOUNCE_MS = 400;
+
+interface Workspace {
+  draft: TrackDraft;
+  category: string;
+  slug: string;
+  bpm: number;
+  contextKey: string;
+  followContextKey: boolean;
+  sourceId: string | null;
+  /** Whether the phrase length was typed by hand. [SPEC-18.21] */
+  beatsManual: boolean;
+}
+
+/** Restore silently, and hand the entry back so stores declared further down can
+ *  seed from it. A corrupted or partial entry is ignored, never repaired:
+ *  starting fresh beats starting from something half-understood. */
+function restoreWorkspace(): Partial<Workspace> | null {
+  const saved = loadJson<Partial<Workspace> | null>(WORKSPACE_KEY, null);
+  if (!saved || typeof saved !== 'object') return null;
+  const d = saved.draft;
+  if (!d || typeof d.patternSource !== 'string' || typeof d.name !== 'string') return null;
+  draft.set({
+    name: d.name,
+    beats: typeof d.beats === 'number' && d.beats > 0 ? d.beats : 4,
+    patternSource: d.patternSource,
+    vars: d.vars && typeof d.vars === 'object' ? d.vars : {},
+    tags: Array.isArray(d.tags) ? d.tags.filter((t) => typeof t === 'string') : [],
+    gain: typeof d.gain === 'number' ? d.gain : undefined,
+    key: typeof d.key === 'string' ? d.key : undefined,
+    comment: typeof d.comment === 'string' ? d.comment : undefined,
+  });
+  if (typeof saved.category === 'string') category.set(saved.category);
+  if (typeof saved.slug === 'string') slug.set(saved.slug);
+  if (typeof saved.bpm === 'number') bpm.set(saved.bpm);
+  if (typeof saved.contextKey === 'string') contextKey.set(saved.contextKey);
+  if (typeof saved.followContextKey === 'boolean') followContextKey.set(saved.followContextKey);
+  if (typeof saved.sourceId === 'string' || saved.sourceId === null) sourceId.set(saved.sourceId);
+  return saved;
+}
+
+// Before the YAML pane initializes from `draft`, so it opens on the restored text.
+const restored = restoreWorkspace();
+
+let workspaceTimer: ReturnType<typeof setTimeout> | undefined;
+
+function saveWorkspace(): void {
+  clearTimeout(workspaceTimer);
+  workspaceTimer = setTimeout(() => {
+    try {
+      saveJson(WORKSPACE_KEY, {
+        draft: get(draft),
+        category: get(category),
+        slug: get(slug),
+        bpm: get(bpm),
+        contextKey: get(contextKey),
+        followContextKey: get(followContextKey),
+        sourceId: get(sourceId),
+        beatsManual: get(beatsIsManual),
+      } satisfies Workspace);
+    } catch (err) {
+      // Quota or private mode: say it once rather than lose work silently.
+      error.set(`Sauvegarde du brouillon impossible : ${(err as Error).message}`); // [SPEC-14.3]
+    }
+  }, WORKSPACE_DEBOUNCE_MS);
+}
+
+for (const store of [draft, category, slug, bpm, contextKey, followContextKey, sourceId]) {
+  store.subscribe(saveWorkspace);
+}
+// `beatsIsManual` is declared further down (it needs `analyse`); subscribed there.
+
 export const audioReady = writable<boolean>(false);
 export const playing = writable<boolean>(false);
 export const status = writable<string | null>(null);
 export const error = writable<string | null>(null);
+
+/**
+ * Events of the pattern queried against the DISPLAYED text, for code highlighting.
+ * [SPEC-18.27] Separate from `roll`, which queries layer by layer on rebuilt
+ * strings whose character offsets mean nothing to the editor.
+ * Empty when highlighting is unavailable — see `codeHighlightable`.
+ */
+export const codeEvents = writable<RollEvent[]>([]);
+/**
+ * True when the played code is the displayed text CHARACTER FOR CHARACTER, the
+ * only case where the offsets designate what the user sees. Expanding `vars`
+ * [SPEC-4.7], dropping a muted layer [SPEC-18.9] or wrapping a transposition
+ * [SPEC-18.12] all shift them — and a highlight off by a few characters is worse
+ * than none, since it points at the wrong thing with the same confidence.
+ */
+export const codeHighlightable = writable<boolean>(true);
 
 /** Events of the current pattern, and the loop length measured from them. */
 export const roll = writable<Roll | null>(null);
@@ -137,6 +250,7 @@ function commitYaml(): void {
   }
 
   yamlError.set(null);
+  clearConditionError(); // the YAML parses again: any refusal it caused is moot
   typedYaml = null;
   const rerun = affectsSound(get(draft), parsed);
   fromYaml = true;
@@ -166,8 +280,64 @@ export function flushYamlEdit(): void {
   commitYaml();
 }
 
+/**
+ * Sound names the pattern asks for that no bank provides. [SPEC-17.56]
+ *
+ * superdough answers an unknown name with silence, which reads exactly like a
+ * pattern that plays nothing — the roll fills with notes and not a sound comes
+ * out. `gm_*` instruments copied from a video are the common case. Checked
+ * against the registry on every analysis, so it is known BEFORE pressing play.
+ */
+export const unknownSounds = writable<string[]>([]);
+
+/** Sound names used by the queried events, minus everything that resolves.
+ *  A `bank()` composes the name at play time, so those haps are left alone
+ *  rather than reported on a guess. */
+function unknownSoundNames(groups: LayerHaps[]): string[] {
+  // Before the banks are in, only the synths are registered and every sample name
+  // would be flagged. Asked of the loader, not of a local flag. [SPEC-17.56]
+  if (!areBanksRegistered()) return [];
+  const known = new Set(engine.registeredSounds());
+  if (known.size === 0) return []; // registry unreadable: claim nothing
+  const missing = new Set<string>();
+  for (const group of groups) {
+    for (const hap of group.haps) {
+      const { s, bank } = hap.value;
+      if (typeof s !== 'string' || s === '') continue;
+      if (typeof bank === 'string' && bank !== '') continue;
+      if (!known.has(s)) missing.add(s);
+    }
+  }
+  return [...missing].sort();
+}
+
 /** Prefix of the refusal below, so it can be cleared without eating other errors. */
 const FIELD_BLOCKED = 'Champ non modifié';
+
+/**
+ * Messages that describe a CONDITION, not a past event. [SPEC-18.24]
+ *
+ * They must vanish the moment the condition does — fixing a syntax error and
+ * still reading the complaint about it teaches you that the tool is not watching.
+ * Event-like failures ("Enregistrement impossible", "Dossier inaccessible") are
+ * deliberately absent: they happened, and clearing them would hide what went
+ * wrong before it was read.
+ */
+const CONDITION_PREFIXES = [
+  FIELD_BLOCKED,
+  'Évaluation impossible',
+  'Variable non définie',
+  'Lecture impossible',
+  'Isolation impossible',
+];
+
+/** Drop a condition message whose condition just resolved. */
+function clearConditionError(): void {
+  const current = get(error);
+  if (current && CONDITION_PREFIXES.some((prefix) => current.startsWith(prefix))) {
+    error.set(null);
+  }
+}
 
 /** Discard the typed text and show the draft again — the way out of a YAML error
  *  the user would rather abandon than fix. The only place typing is dropped, and
@@ -325,8 +495,21 @@ export async function unlockAudio(): Promise<void> {
       error.set(`Audio verrouillé (AudioContext : ${engine.audioState}). Recliquez pour activer.`);
       return;
     }
-    await engine.loadSamples(SAMPLE_BANK);
-    status.set('Banque de sons chargée');
+    // Same banks as the instrument AND as the REPL, so what is written here
+    // sounds identical everywhere. [SPEC-17.54]
+    const banks = await loadAllBanks(engine);
+    status.set(`Banques de sons chargées (${banks.loaded.length})`);
+    if (banks.failed.length > 0) {
+      error.set(
+        `Banque(s) indisponible(s) : ${banks.failed.map((f) => `${f.label} (${f.message})`).join(' · ')}`,
+      ); // [SPEC-14.3]
+    }
+    // A toast, not `error`: a missing GM import is a standing condition of the
+    // machine, not a fault of the pattern being written. [SPEC-17.55]
+    const sf = soundfontNotice(banks.soundfonts);
+    if (sf) notify(sf.level, sf.text);
+    // Only now can an unknown name be told apart from one not yet registered.
+    void analyse();
   } catch (err) {
     error.set(`Activation audio impossible : ${(err as Error).message}`);
   }
@@ -345,14 +528,26 @@ export async function play(): Promise<void> {
     return;
   }
   error.set(null);
+  // The moment silence would surprise: say it here, once, rather than on every
+  // keystroke. [SPEC-17.56, SPEC-14.3]
+  const missing = get(unknownSounds);
+  if (missing.length > 0) {
+    notify(
+      'warn',
+      `Son inconnu : ${missing.join(', ')} — rien ne sera joué pour ce nom. Vérifie le panneau « Sons ».`,
+    );
+  }
   try {
     engine.setCps(get(bpm) / 60 / BEATS_PER_CYCLE);
     await engine.setVoice(0, 0, expanded.pattern);
     lastPushed = expanded.pattern;
     await engine.startTransport();
     playing.set(true);
+    // Follow the transport only while it runs. [SPEC-18.27]
+    startPlayhead(() => get(bpm) / 60 / BEATS_PER_CYCLE);
   } catch (err) {
     playing.set(false);
+    stopPlayhead();
     error.set(`Lecture impossible : ${(err as Error).message}`);
   }
 }
@@ -362,6 +557,7 @@ export function stop(): void {
   void engine.setVoice(0, 0, null);
   lastPushed = null;
   playing.set(false);
+  stopPlayhead();
 }
 
 /** Code currently loaded in the voice, so an unchanged pattern is not re-evaluated. */
@@ -382,6 +578,7 @@ async function pushVoice(): Promise<void> {
   try {
     lastPushed = expanded.pattern;
     await engine.setVoice(0, 0, expanded.pattern);
+    clearConditionError(); // it evaluates now [SPEC-18.24]
   } catch (err) {
     error.set(`Évaluation impossible : ${(err as Error).message}`); // never silent [SPEC-14.3]
   }
@@ -398,6 +595,28 @@ export function applyBpm(value: number): void {
 let analyseToken = 0;
 
 /**
+ * True once the user typed a phrase length by hand: their value then wins over the
+ * automatic one, until the draft is replaced. [SPEC-18.21] Single source for that
+ * state — a mirrored copy would drift.
+ */
+export const beatsIsManual = writable<boolean>(restored?.beatsManual === true);
+
+beatsIsManual.subscribe(saveWorkspace);
+
+/** Take over the phrase length manually. */
+export function setBeatsManually(beats: number): void {
+  beatsIsManual.set(true);
+  updateDraft((d) => ({ ...d, beats }));
+  void analyse(); // the view spans the declared phrase
+}
+
+/** Hand the phrase length back to the automatic rule. */
+export function resumeAutoBeats(): void {
+  beatsIsManual.set(false);
+  void analyse();
+}
+
+/**
  * Re-derive the loop length and the roll from the pattern. [SPEC-18.8]
  * Runs on every edit; concurrent calls are ordered by token so a slow analysis
  * of stale text can never overwrite a newer result.
@@ -412,8 +631,10 @@ export async function analyse(): Promise<void> {
   const code = expanded.pattern;
   if (code.trim() === '') {
     patternError.set(null);
+    clearConditionError(); // nothing left to complain about [SPEC-18.24]
     roll.set(null);
     loopBeats.set(null);
+    unknownSounds.set([]);
     return;
   }
 
@@ -421,6 +642,14 @@ export async function analyse(): Promise<void> {
     const beats = await engine.measureLengthBeats(code, BEATS_PER_CYCLE);
     if (token !== analyseToken) return;
     loopBeats.set(beats);
+
+    // Declare the phrase automatically [SPEC-18.21], BEFORE spanning the view so
+    // the roll is drawn at the length that was just decided. A value the user
+    // typed themselves is never overwritten.
+    const auto = phraseBeatsFor(beats);
+    if (!get(beatsIsManual) && auto !== null && auto !== get(draft).beats) {
+      draft.update((d) => ({ ...d, beats: auto }));
+    }
 
     // The view spans the DECLARED phrase, twice, so the repeat is visible at the
     // length the author intends — not at the minimal period, which for `bd*8`
@@ -436,7 +665,26 @@ export async function analyse(): Promise<void> {
       if (token !== analyseToken) return;
     }
     roll.set(buildRoll(groups, span));
+    // Notes on screen with no sound behind them is the confusion to prevent.
+    unknownSounds.set(unknownSoundNames(groups));
+
+    // Code highlighting needs events tied to the DISPLAYED text, so it takes its
+    // own query — and only when the played code is that very text. [SPEC-18.27]
+    const source = get(draft).patternSource;
+    const highlightable = code === source;
+    codeHighlightable.set(highlightable);
+    if (highlightable) {
+      const haps = await engine.queryEvents(source, span);
+      if (token !== analyseToken) return;
+      codeEvents.set(buildRoll([{ layer: 0, haps }], span).events);
+    } else {
+      codeEvents.set([]);
+    }
+
     patternError.set(null);
+    // The pattern evaluates and queries: every complaint about it is now stale,
+    // including those raised elsewhere (playback, isolation). [SPEC-18.24]
+    clearConditionError();
 
     // The measured period is NOT the declared `beats` and must never overwrite it.
     // `measureLengthBeats` finds the SMALLEST period: `s("bd*4")` repeats every
@@ -483,6 +731,7 @@ export function loadTrack(id: string): void {
   slug.set(track.slug);
   sourceId.set(track.id); // remembered so a rename can be flagged [SPEC-18.15]
   resetLayerState(); // layer indices belonged to the previous pattern
+  beatsIsManual.set(false); // the loaded file declares its own phrase [SPEC-18.21]
   status.set(`Chargé : ${track.category} · ${track.name}`);
   void refreshTargetExists();
   void analyse();
@@ -495,13 +744,12 @@ export function newTrack(): void {
   status.set(null);
   sourceId.set(null);
   resetLayerState();
+  beatsIsManual.set(false);
   void analyse();
 }
 
 // --- Writing to the library ------------------------------------------------
 
-/** Id of the track this draft was loaded from, to detect a rename. [SPEC-18.15] */
-export const sourceId = writable<string | null>(null);
 /** Name of the authorized folder, or null while saving is not possible yet. */
 export const folder = writable<string | null>(null);
 export const canWriteToDisk = isSupported();
@@ -554,13 +802,19 @@ export async function refreshTargetExists(): Promise<void> {
   targetExists.set(await trackExists(get(category), get(slug)));
 }
 
-/** Authorize the library folder. MUST be called from a user gesture. */
+/** Warning about the folder just chosen — wrong level, most often. [SPEC-18.15] */
+export const folderWarning = writable<string | null>(null);
+
+/** Choose the library folder. MUST be called from a user gesture. Always reopens
+ *  the picker, so a wrong choice can be corrected. */
 export async function pickFolder(): Promise<void> {
   error.set(null);
   try {
-    folder.set(await chooseFolder());
+    const chosen = await chooseFolder();
+    folder.set(chosen.name);
+    folderWarning.set(chosen.problem);
     await refreshTargetExists();
-    status.set(`Dossier autorisé : ${get(folder)}`);
+    status.set(`Dossier : ${chosen.name}`);
   } catch (err) {
     // A cancelled picker is a choice, not a failure worth shouting about.
     const message = (err as Error).message;

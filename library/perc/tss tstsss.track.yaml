@@ -1,0 +1,4 @@
+name: tss tstsss
+beats: 4
+pattern: |-
+  s("~ ~ BossDR110_cr ~ ~ ~ BossDR110_cr BossDR110_cr ~ ~ BossDR110_cr ~ ~ ~ BossDR110_cr BossDR110_cr").gain(0.6)

@@ -1,0 +1,4 @@
+name: clave 1
+beats: 4
+pattern: |-
+  s("~ ~ ~ ~ clave:2 ~ clave:2 ~ ~ ~ ~ ~ clave:2 ~ ~ ~, 808bd")

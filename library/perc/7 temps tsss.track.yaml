@@ -1,0 +1,4 @@
+name: 7 temps + tsss
+beats: 8
+pattern: |-
+  s("~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ BossDR110_cr ~").slow(2).gain(0.6)

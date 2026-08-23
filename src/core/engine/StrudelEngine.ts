@@ -262,6 +262,11 @@ export class StrudelEngine implements TimeSource {
       // Live per-channel control accessors available inside evaluated code.
       await evalScope({
         chgain: (id: number) => ref(() => this.gainFor(id)),
+        // Fade-in of ONE voice, addressed by an INTEGER handle [SPEC-17.60/17.60.1].
+        // Per voice and not per channel: arming a second loop must never duck the
+        // first. The handle is a number because the transpiler rewrites every
+        // string literal of evaluated code into mini-notation.
+        fadeg: (id: number) => ref(() => this.fadeFor(id)),
         // Per-channel effect refs. The LP/HP cutoffs fall back to the bipolar
         // filter when their fx is off; delay/reverb are neutral (0) when off, so
         // toggling and knob/fader moves are instant without re-eval. [SPEC-17.23]
@@ -438,21 +443,36 @@ export class StrudelEngine implements TimeSource {
 
   // --- Voice/stack model ([SPEC-5.1]) ---
   //
-  // Each active clip is a "voice" keyed by `${channel}:${slot}`. The audible
+  // Each active clip is a "voice" keyed by `${set}:${channel}:${slot}`. The audible
   // output is the stack of all active voices, each routed through its channel
   // gain (live ref → immediate volume [SPEC-7.1]). Toggling a slot rebuilds and
   // re-evaluates the stack; the scheduler keeps running (silence when empty) so
   // the master clock never stops. Rebuilds are serialized to avoid races on
   // rapid toggles.
   private readonly voices = new Map<string, string>();
+  // Fade-in multiplier per voice, 0..1, keyed by an INTEGER handle. Absent = no
+  // fade (neutral 1). Read by the `fadeg` ref on every event, so the ramp is heard
+  // on each new hit while notes already sounding keep their gain — which is
+  // exactly what a fade-in on percussion is. [SPEC-17.60]
+  private readonly voiceFades = new Map<number, number>();
+  // Voice key → handle. ⚠ The handle MUST be a number: Strudel's transpiler
+  // rewrites every string literal of evaluated code into mini-notation — measured,
+  // `fadeg("set-1:0:0")` becomes `fadeg(m('set-1:0:0', …))` — so a string argument
+  // would arrive as a Pattern, the lookup would always miss, and the fade would
+  // silently do nothing. [SPEC-17.60.1]
+  private readonly fadeIds = new Map<string, number>();
+  private nextFadeId = 1;
   private rebuilding = false;
   private pendingRebuild = false;
   // Transport running state. When false, the stack is set but the scheduler is
   // NOT started, so arming voices (toggling slots) stays silent until PLAY.
   private running = false;
 
-  private voiceKey(channel: number, slot: number): string {
-    return `${channel}:${slot}`;
+  // The set is part of the key so loops of a set the pads no longer address keep
+  // playing: switching set changes WHICH pads address what, never what sounds.
+  // [SPEC-20.4]
+  private voiceKey(channel: number, slot: number, setId: string): string {
+    return `${setId}:${channel}:${slot}`;
   }
 
   /**
@@ -462,7 +482,7 @@ export class StrudelEngine implements TimeSource {
    * per event in superdough, so they are inserted ONLY while active — their
    * on/off triggers a voice re-eval, their parameters stay live. [SPEC-17.23/17.28]
    */
-  private voiceChain(code: string, channel: number): string {
+  private voiceChain(code: string, channel: number, fadeKey?: string): string {
     const fx = this.fxFor(channel);
     // Phase nudge first: it shifts the pattern in time, before any processing.
     const shifted =
@@ -509,17 +529,61 @@ export class StrudelEngine implements TimeSource {
     // has to scale what the track declares [SPEC-4.2], not discard it. `mul` on a
     // missing field yields the factor itself, so a track without `gain` still ends
     // up at the channel level. [SPEC-17.53]
-    return `${chain}.mul(gain(chgain(${channel})))`;
+    // A fade-in multiplies too, after the channel gain: it scales what the fader
+    // says, exactly as the fader scales what the track wrote. Present only while
+    // a fade is wanted, so an ordinary voice carries nothing extra. [SPEC-17.60]
+    const fade =
+      fadeKey === undefined ? '' : `.mul(gain(fadeg(${this.fadeIdFor(fadeKey)})))`;
+    return `${chain}.mul(gain(chgain(${channel})))${fade}`;
   }
 
-  /** Add/replace (code) or remove (null) a voice, then rebuild the stack. */
-  async setVoice(channel: number, slot: number, code: string | null): Promise<void> {
+  // --- Fade-in of a single voice [SPEC-17.60] ---
+
+  /** Current fade multiplier of a voice: 1 when it has no fade. */
+  private fadeFor(id: number): number {
+    return this.voiceFades.get(id) ?? 1;
+  }
+
+  /** Stable integer handle of a voice's fade, assigned on first use. */
+  private fadeIdFor(key: string): number {
+    let id = this.fadeIds.get(key);
+    if (id === undefined) {
+      id = this.nextFadeId++;
+      this.fadeIds.set(key, id);
+    }
+    return id;
+  }
+
+  /** Set a voice's fade multiplier (0..1). The ramp itself is driven by the store,
+   *  which owns the clock and the window. */
+  setVoiceFade(setId: string, channel: number, slot: number, value: number): void {
+    const id = this.fadeIdFor(this.voiceKey(channel, slot, setId));
+    this.voiceFades.set(id, Math.min(1, Math.max(0, value)));
+  }
+
+  /** Forget a voice's fade, so a later arming starts from full gain. */
+  clearVoiceFade(setId: string, channel: number, slot: number): void {
+    this.voiceFades.delete(this.fadeIdFor(this.voiceKey(channel, slot, setId)));
+  }
+
+  /** Add/replace (code) or remove (null) a voice, then rebuild the stack. `setId`
+   *  identifies the pad set owning the voice [SPEC-20.4]; the audio channel stays
+   *  the column (one orbit per channel, [SPEC-17.37]). */
+  async setVoice(
+    channel: number,
+    slot: number,
+    code: string | null,
+    setId = '',
+    fade = false,
+  ): Promise<void> {
     if (!this.channelGains.has(channel)) this.channelGains.set(channel, DEFAULT_CHANNEL_GAIN);
-    const key = this.voiceKey(channel, slot);
+    const key = this.voiceKey(channel, slot, setId);
     if (code === null) {
       this.voices.delete(key);
     } else {
-      this.voices.set(key, this.voiceChain(code, channel));
+      // `fade` inserts this voice's own gain ref, so the ramp bites on it alone.
+      // [SPEC-17.60]
+      this.voices.set(key, this.voiceChain(code, channel, fade ? key : undefined));
     }
     await this.rebuild();
   }
@@ -557,6 +621,7 @@ export class StrudelEngine implements TimeSource {
   stop(): void {
     this.running = false;
     this.voices.clear();
+    this.voiceFades.clear(); // no voice left to fade [SPEC-17.60]
     this.killEchoes();
     if (!this.repl) return;
     this.repl.scheduler.stop();

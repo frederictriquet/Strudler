@@ -9,6 +9,7 @@
     transportRunning,
     assignSlotTrack,
     showSlotProgress,
+    activeSetColor,
   } from '@stores/rackStore';
   import { clockState } from '@stores/clockStore';
   import { placementMode, heldTrack } from '@stores/placementStore';
@@ -17,6 +18,7 @@
     isMissingTrack,
     FX_KINDS,
     FX_META,
+    LAUNCH_META,
     type ChannelState,
     type SlotState,
     type FxKind,
@@ -33,6 +35,7 @@
   const clk = clockState;
   const showProg = showSlotProgress;
   const physical = physicalPositions;
+  const setColor = activeSetColor;
 
   /** Last observed hardware position for a control, or undefined. [SPEC-17.29] */
   function ghost(
@@ -94,7 +97,9 @@
 </script>
 
 <section class="panel">
-  <div class="rack">
+  <!-- The current set's colour reaches the resting slots, so screen and APC tell
+       the same story. [SPEC-20.6] -->
+  <div class="rack" style="--set-color: {$setColor}">
     {#each $channels as ch (ch.id)}
       <div
         class="strip"
@@ -104,16 +109,18 @@
         <div class="head">
           <span class="num">{ch.id + 1}</span>
           <span class="cat">{ch.categories.join(', ') || '—'}</span>
+          <!-- Three launch modes on ONE button, mirroring the APC's off / on /
+               blink [SPEC-17.60]. The blink is drawn here too, so screen and
+               hardware say the same thing. -->
           <button
             class="qz"
-            class:on={ch.quantized}
+            class:on={ch.launch === 'quantized'}
+            class:fade={ch.launch === 'fade'}
             onclick={() => dispatch({ type: 'channelModeToggle', channel: ch.id })}
-            title={ch.quantized
-              ? 'Canal quantisé — clic pour immédiat'
-              : 'Canal immédiat — clic pour quantisé'}
-            aria-label={`Quantisation du canal ${ch.id + 1}`}
+            title={LAUNCH_META[ch.launch].title}
+            aria-label={`Mode de lancement du canal ${ch.id + 1} : ${LAUNCH_META[ch.launch].name}`}
           >
-            {ch.quantized ? '⏱' : '⚡'}
+            {LAUNCH_META[ch.launch].glyph}
           </button>
           <button
             class="edit"
@@ -135,6 +142,11 @@
               class:pending-stop={slot.pending && slot.playing && !placingActive}
               class:place={authorized(ch)}
               class:missing={missing && !placingActive}
+              class:rest={!!slot.trackId &&
+                !slot.playing &&
+                !slot.pending &&
+                !missing &&
+                !placingActive}
               disabled={placingActive ? !authorized(ch) : !slot.trackId}
               title={placingActive
                 ? authorized(ch)
@@ -173,7 +185,7 @@
             class="fxnav"
             onclick={() => dispatch({ type: 'channelFxPrev', channel: ch.id })}
             title="Effet précédent (nano S)"
-            aria-label="Effet précédent">◄</button
+            aria-label="Effet précédent">◂</button
           >
           <button
             class="fxbtn"
@@ -187,7 +199,7 @@
             class="fxnav"
             onclick={() => dispatch({ type: 'channelFxNext', channel: ch.id })}
             title="Effet suivant (nano R)"
-            aria-label="Effet suivant">►</button
+            aria-label="Effet suivant">▸</button
           >
         </div>
         <!-- One dot per effect: filled = active, ringed = focused. -->
@@ -308,6 +320,20 @@
     color: #f0b429;
     border-color: #f0b429;
   }
+  /* Fade-in mode: blinking, like the APC's button. [SPEC-17.60] */
+  .qz.fade {
+    color: #6ab6ff;
+    border-color: #6ab6ff;
+    animation: qz-blink 1s steps(2, start) infinite;
+  }
+  @keyframes qz-blink {
+    0% {
+      background: rgba(106, 182, 255, 0.28);
+    }
+    100% {
+      background: transparent;
+    }
+  }
   .edit {
     padding: 0.1rem 0.4rem;
     font-size: 0.85rem;
@@ -332,6 +358,17 @@
     text-align: left;
     padding: 0.4rem 0.5rem;
     background: var(--panel);
+  }
+  /* Resting slot (track bound, silent, nothing pending): tinted with the current
+     set's colour — the same colour the pad shows on the APC. [SPEC-20.6] The
+     state rules below (.missing, .playing, .pending-*) are declared after and
+     therefore keep the upper hand. */
+  .slot.rest {
+    border-color: color-mix(in srgb, var(--set-color) 45%, var(--border));
+    background: color-mix(in srgb, var(--set-color) 9%, var(--panel));
+  }
+  .slot.rest .slot-label {
+    color: color-mix(in srgb, var(--set-color) 70%, var(--muted));
   }
   /* Loop-progress gauge: thin bar along the bottom edge of a playing slot.
      Width is bound to the live position, so it fills over the track's length
@@ -429,6 +466,12 @@
     padding: 0.2rem 0.35rem;
     font-size: 0.62rem;
     color: var(--muted);
+    /* Same box for ◂ and ▸, a text presentation on both, and a size that keeps
+       them readable — the small-triangle pair draws much finer than ◄ ►. */
+    min-width: 1.3rem;
+    font-size: 0.9rem;
+    line-height: 1;
+    font-variant-emoji: text;
   }
   .fxbtn {
     flex: 1;

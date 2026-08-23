@@ -16,8 +16,12 @@
     removeSound,
     renameSound,
     serializeDrumGrid,
+    setCycles,
+    cyclesFit,
+    gridBeats,
     setSteps,
     stepsPerBeat,
+    MAX_GRID_CYCLES,
     toggleCell,
     willLoseHits,
     type DrumGrid,
@@ -26,8 +30,12 @@
   interface Props {
     pattern: string;
     onchange: (pattern: string) => void;
+    /** Longueur déclarée de la piste, en beats — pour proposer d'y aligner la
+     *  grille. La grille ne s'aligne JAMAIS d'elle-même : le code reste la source
+     *  de vérité [SPEC-18.32]. */
+    beats?: number | null;
   }
-  let { pattern, onchange }: Props = $props();
+  let { pattern, onchange, beats = null }: Props = $props();
 
   let newSound = $state('');
   /** Refused edit, shown in the component itself rather than only in the console. */
@@ -45,7 +53,16 @@
   const reason = $derived(grid === null ? analysis.reason : null);
 
   const blank = $derived(pattern.trim() === '');
-  const perBeat = $derived(grid ? stepsPerBeat(grid.steps) : null);
+  const perBeat = $derived(grid ? stepsPerBeat(grid.steps, grid.cycles) : null);
+  const loopBeats = $derived(grid ? gridBeats(grid) : null);
+  /** Longueurs proposées, en beats : un cycle vaut 4 temps. [SPEC-18.32] */
+  const BEAT_CHOICES = Array.from({ length: MAX_GRID_CYCLES }, (_, i) => (i + 1) * 4);
+  /** La piste déclare une autre longueur que la grille : on le dit, sans agir. */
+  const mismatch = $derived(
+    grid && typeof beats === 'number' && beats > 0 && beats % 4 === 0 && beats !== gridBeats(grid)
+      ? beats
+      : null,
+  );
   const columns = $derived(grid ? Array.from({ length: grid.steps }, (_, i) => i) : []);
 
   const STEP_CHOICES = [4, 8, 12, 16, 24, 32, 48, 64];
@@ -68,6 +85,18 @@
       return;
     }
     commit(setSteps(grid, steps));
+  }
+
+  /** Étendre ou réduire la grille à `n` temps, à durée de pas constante. */
+  function changeBeats(nextBeats: number): void {
+    if (!grid) return;
+    const cycles = Math.round(nextBeats / 4);
+    if (!cyclesFit(grid, cycles)) {
+      problem = `${nextBeats} temps à cette résolution dépasseraient les pas affichables — baisse « Pas » d'abord.`;
+      return;
+    }
+    problem = null;
+    commit(setCycles(grid, cycles));
   }
 
   function add(sound: string): void {
@@ -103,7 +132,14 @@
   /** Start from an empty 16-step grid — only offered when there is nothing to
    *  lose, i.e. the pattern is blank. */
   function startBlank(): void {
-    commit({ sounds: ['bd'], steps: 16, cells: [new Array<boolean>(16).fill(false)], call: 's', suffix: '' });
+    commit({
+      sounds: ['bd'],
+      steps: 16,
+      cycles: 1,
+      cells: [new Array<boolean>(16).fill(false)],
+      call: 's',
+      suffix: '',
+    });
   }
 </script>
 
@@ -121,11 +157,19 @@
           {/if}
         </select>
       </label>
+      <label>
+        Temps
+        <select value={loopBeats} onchange={(e) => changeBeats(Number(e.currentTarget.value))}>
+          {#each BEAT_CHOICES as b (b)}
+            <option value={b}>{b}</option>
+          {/each}
+        </select>
+      </label>
       <span class="hint">
         {#if perBeat}
-          {perBeat} pas par temps · 4 temps par cycle
+          {perBeat} pas par temps · {loopBeats} temps
         {:else}
-          {grid.steps} pas — ne se divise pas en 4 temps
+          {grid.steps} pas — ne se divise pas en {loopBeats} temps
         {/if}
       </span>
       <label class="add">
@@ -195,6 +239,16 @@
       </table>
     </div>
 
+    {#if mismatch !== null}
+      <!-- Jamais d'alignement automatique : ouvrir un outil ne doit pas réécrire
+           le pattern. On énonce l'écart et on l'offre. [SPEC-18.32] -->
+      <p class="hint">
+        La piste déclare <strong>{mismatch} temps</strong>, la grille en couvre {loopBeats}.
+        <button class="align" onclick={() => changeBeats(mismatch)}>
+          Étendre la grille à {mismatch} temps
+        </button>
+      </p>
+    {/if}
     {#if problem}
       <p class="bad">{problem}</p>
     {/if}
@@ -256,6 +310,11 @@
     font-size: 0.7rem;
     color: var(--muted);
     padding-bottom: 0.3rem;
+  }
+  .align {
+    margin-left: 0.4rem;
+    padding: 0.1rem 0.4rem;
+    font-size: 0.72rem;
   }
   .bad {
     margin: 0;

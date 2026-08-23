@@ -11,7 +11,12 @@
 
 import { derived, get, writable } from 'svelte/store';
 import { engine } from '@core/engine/StrudelEngine';
-import { areBanksRegistered, loadAllBanks, soundfontNotice } from '@core/engine/sampleBanks';
+import {
+  areBanksRegistered,
+  loadAllBanks,
+  normalizeSoundName,
+  soundfontNotice,
+} from '@core/engine/sampleBanks';
 import { notify } from '@stores/logStore';
 import { library } from '@core/library/Library';
 import {
@@ -297,7 +302,10 @@ function unknownSoundNames(groups: LayerHaps[]): string[] {
   // Before the banks are in, only the synths are registered and every sample name
   // would be flagged. Asked of the loader, not of a local flag. [SPEC-17.56]
   if (!areBanksRegistered()) return [];
-  const known = new Set(engine.registeredSounds());
+  // Compared through superdough's OWN normalization: it registers and looks up
+  // lowercased, so `BossDR110_cr` sits in the registry as `bossdr110_cr` and a raw
+  // comparison called every drum machine unknown. [SPEC-17.56.1]
+  const known = new Set(engine.registeredSounds().map(normalizeSoundName));
   if (known.size === 0) return []; // registry unreadable: claim nothing
   const missing = new Set<string>();
   for (const group of groups) {
@@ -305,7 +313,7 @@ function unknownSoundNames(groups: LayerHaps[]): string[] {
       const { s, bank } = hap.value;
       if (typeof s !== 'string' || s === '') continue;
       if (typeof bank === 'string' && bank !== '') continue;
-      if (!known.has(s)) missing.add(s);
+      if (!known.has(normalizeSoundName(s))) missing.add(s);
     }
   }
   return [...missing].sort();

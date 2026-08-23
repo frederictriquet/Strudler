@@ -514,10 +514,65 @@ du PLAY, là où le silence surprend. Un `bank()` composant le nom au déclenche
 sont laissés de côté plutôt qu'accusés à tort. La vérification n'a lieu qu'une fois les banques
 enregistrées, sans quoi tout nom d'échantillon paraîtrait inconnu.
 
+**[SPEC-17.56.1] La comparaison au registre passe par la normalisation de superdough.** Corrige [SPEC-17.56]. `BossDR110_cr` — choisi dans le navigateur de sons, joué sans faute — était annoncé **inconnu**. Mesuré dans `superdough/dist/index.mjs` : `registerSound` enregistre sous `nom.toLowerCase().replace(/\s+/g, '_')` et `getSound` relit sous `nom.toLowerCase()`. Un nom qui ne diffère que par la **casse** joue donc parfaitement, alors qu'une comparaison de chaînes brutes le déclare absent : les 71 boîtes à rythmes de tidal-drum-machines, toutes en casse mixte (`RolandTR909_bd`, `AkaiMPC60_cr`…), étaient signalées à tort. Toute comparaison avec le registre DOIT passer par la même normalisation, **des deux côtés**. Une fausse alerte dans un canal d'erreur est plus grave qu'une absence d'alerte : elle apprend à ignorer le canal. *Impl. : `normalizeSoundName` dans `core/engine/sampleBanks.ts`, `unknownSoundNames` dans `composerStore`.*
+
 **[SPEC-17.57]** L'atelier capture le **journal de Strudel** (`initLogCapture`) comme l'instrument :
 ses avertissements n'arrivaient que dans la console de la page.
 
 ---
+
+---
+
+### Lancement par canal : un troisième état
+
+**[SPEC-17.60] Trois modes de lancement sur le bouton du canal.** Étend [SPEC-17.17]. Le bouton de chaque canal (⚡/⏱ dans la GUI, rangée du bas de l'APC) cycle sur **trois** états au lieu de deux :
+
+| état | LED APC | comportement |
+|---|---|---|
+| **immédiat** | éteinte | la loop démarre sous le doigt |
+| **quantisé** | allumée | la loop est mise en attente de la prochaine fenêtre [SPEC-8] |
+| **fondu** | **clignotante** | la loop démarre **tout de suite** et **monte progressivement sur la durée d'une fenêtre** |
+
+Le troisième état est un état **du même bouton** parce que les boutons hors grille de l'APC sont des LED monochromes à trois valeurs — éteint / allumé / clignotant [SPEC-20.5] : la correspondance est exacte, et l'écran reprend le clignotement pour dire la même chose.
+
+**Le fondu appartient à la voix, pas au canal.** Le gain de canal est partagé par toutes les loops de la colonne : y appliquer la rampe ferait plonger ce qui joue déjà quand on arme une deuxième loop. La voix armée reçoit donc **son propre `ref` de gain** (`fadeg("set:canal:slot")`), qui **multiplie** le gain de canal comme celui-ci multiplie ce que la piste déclare [SPEC-17.53]. Le facteur n'est inséré dans la chaîne que **lorsqu'un fondu est voulu** : une voix ordinaire ne porte rien de plus.
+
+**La rampe est pilotée image par image par l'application**, jamais par une automation Web Audio, pour la même raison que le balayage de filtre [SPEC-17.43] : chaque événement réécrit son gain depuis le `ref`, donc une automation serait écrasée à la note suivante. Chaque nouvelle frappe est ainsi plus forte que la précédente et les notes déjà en cours gardent la leur — c'est précisément ce qu'est un fondu d'entrée sur de la percussion. La durée est **fixée au lancement** (fenêtre courante × tempo courant) : un changement de tempo en cours de fondu ne l'étire pas, puisque ce qui a été entendu commençait avec cette durée-là.
+
+**Choix assumés**, à retourner d'un mot :
+- le fondu **ne quantise pas** le départ. La loop part au doigt et le fondu masque le décalage ; attendre la frontière *puis* fondre sur une fenêtre repousserait le plein volume à 2 × W (32 temps à W = 16).
+- l'**arrêt** reste net. Seule l'activation est un fondu, comme demandé ; un fondu de sortie serait un quatrième comportement, pas un état de plus.
+- le bouton **global** (nano CYCLE / GUI) fait avancer **tous** les canaux dans le même cycle ; des canaux disparates sont d'abord **nivelés** sur « immédiat », pour que l'appui ait un résultat prévisible.
+
+**Migration** : l'état persisté portait un booléen `quantized` par canal, et les scènes [SPEC-17.52] un tableau de booléens. Les deux sont **relus** et traduits (`true` → quantisé), jamais réinitialisés — un rack sauvegardé ne doit pas revenir tout en immédiat.
+
+**[SPEC-17.60.2] Le fondu vaut dans les deux sens, et seulement en cours de jeu.** Complète [SPEC-17.60].
+
+- **Fondu de sortie** : couper une loop sur un canal en mode fondu la fait **descendre sur une fenêtre** au lieu de s'arrêter net. Elle reste **audible et armée** pendant la descente, et son pad **clignote en rouge** — le code visuel existant de « va s'arrêter » [SPEC-17.16] dit exactement cela. La voix n'est réellement supprimée qu'au bout de la rampe.
+- **Un appui pendant la descente l'annule** et fait remonter le niveau depuis là où il était tombé — même règle qu'un second appui sur une bascule quantisée en attente [SPEC-8.4] : le geste s'annule, il ne s'empile pas. La durée de la remontée est **proportionnelle à la distance restante**, pour qu'annuler une descente à peine commencée ne prenne pas une fenêtre entière.
+- La voix est **réévaluée avec son facteur de fondu** au début de la descente : elle a pu être armée alors que le canal était dans un autre mode, et sa chaîne ne porterait alors aucun facteur sur lequel mordre. Réévaluer ne redémarre pas le motif — Strudel l'aligne sur la grille de cycles globale.
+- **L'état n'est basculé qu'après** la décision de fondre : inverser `playing` d'abord aurait émis une frame de « arrêté » — pad éteint et faux cue `slot` vers la sortie scénique [SPEC-20.13] — avant de le remettre.
+- **Uniquement transport en lecture.** À l'arrêt, rien n'est entendu : une rampe s'écoulerait en temps réel contre du silence et serait terminée avant le PLAY. Armer et couper y sont donc nets, et le mode fondu ne s'exprime qu'en jeu — c'est ce qui était voulu.
+- **Une réassignation coupe net** : le son qui fondrait est celui qu'on remplace.
+
+**[SPEC-17.60.1] Aucun littéral chaîne dans le code généré.** Le fondu ne faisait rien du tout : la voix était adressée par sa clé `"set:canal:slot"`, or **le transpileur de Strudel réécrit tout littéral chaîne en mini-notation**. Mesuré :
+
+```
+IN  : …mul(gain(fadeg("set-1:0:0")))
+OUT : …mul(gain(fadeg(m('set-1:0:0', 57))))
+```
+
+La fonction recevait donc un **Pattern** et non la clé ; la recherche échouait, le facteur restait à 1, et la loop démarrait à plein volume — sans la moindre erreur, puisque `set-1:0:0` est de la mini-notation valide. Règle générale : **tout argument passé à une fonction du scope d'évaluation DOIT être numérique**. Le fondu s'adresse donc par un **entier** attribué à la voix (`fadeg(7)`).
+
+Vérifié en Node, sans navigateur : le transpileur réécrit bien la chaîne et laisse l'entier intact ; deux `.mul(gain(…))` **se composent** (0,5 × 0,25 = 0,125) et le `ref` est **relu à chaque requête** — le mécanisme était bon, seule l'adresse était perdue.
+
+*Impl. : `ChannelLaunch`/`LAUNCH_META`/`stepChannelLaunch`/`coerceChannelLaunch` dans `core/channels/types.ts`, `channelLaunch`/`stepChannelLaunch`/`setAllLaunch`/`commonLaunch`/`launchSnapshot`/`launchDiff`/`onFadeStart` dans `ChannelRack`, `fadeg` + `setVoiceFade`/`clearVoiceFade` + argument `fade` de `setVoice` dans `StrudelEngine`, `startVoiceFade` dans `rackStore`, garde `!== 'quantized'` dans `Launcher`, bouton à trois états dans `ChannelRack.svelte` et indicateur global dans `ClockPanel.svelte`.*
+
+### Veille du système & lampes du transport
+
+**[SPEC-17.58] Pas de veille pendant la lecture.** Un set dure plus longtemps que le délai de veille par défaut, et l'écran qui s'éteint en pleine lecture emporte le seul retour visuel disponible : pads, chronomètre [SPEC-17.38], position dans la fenêtre. Le verrou **Screen Wake Lock** est donc demandé au **PLAY** et rendu au **STOP** — jamais en permanence, la machine n'ayant aucune raison de rester éveillée transport arrêté. Ses limites sont **structurelles et doivent être dites** plutôt que promises : le navigateur **relâche le verrou dès que la page n'est plus visible** (autre onglet, fenêtre minimisée), il ne couvre **ni** la fermeture du capot, **ni** une mise en veille explicite, et il exige un contexte sécurisé (`localhost` en est un). Le retour au premier plan **redemande** le verrou, l'événement `release` du navigateur étant écouté pour que l'indicateur ne mente jamais. Un échec est signalé **une fois** — sur scène, un toast par tentative serait pire que le problème — avec la parade (désactiver la veille dans les réglages système). L'état est affiché **seulement lorsqu'il est vrai** (« veille bloquée » dans la barre de transport) : l'enjeu est de savoir que l'écran restera allumé, pas de le promettre. *Impl. : `src/core/system/wakeLock.ts`, `wakeLockHeld` + abonnement à `transportRunning` dans `rackStore`, indicateur dans `ClockPanel.svelte`.*
+
+**[SPEC-17.59] Les lampes du transport suivent le mode.** Les boutons **PLAY (CC 41)**, **STOP (CC 42)** et **REC (CC 45)** du nanoKONTROL2 s'allument selon l'état : PLAY en lecture, STOP à l'arrêt, REC pendant l'enregistrement du journal de gestes [SPEC-11]. La surface dit donc dans quel mode elle est, au lieu de laisser cette information à l'écran seul. **REC est également mappé** en entrée (bascule du journal) : une lampe allumée sur un bouton inerte est un piège sur scène, et [PLAN B] veut de toute façon que GUI et MIDI produisent le même Intent. Un rejeu en cours **refuse** l'enregistrement plutôt que de capter sa propre ré-émission. ⚠ Les LED du nano ne répondent que si son préréglage est en **LED Mode : External** (Korg Kontrol Editor) ; sinon elles restent pilotées par l'appareil et rien de ce qui est envoyé n'a d'effet. *Impl. : `transportRecord` dans `core/mapping/mapping.ts`, intent `sessionRecordToggle`, boucle des lampes + `toggleSessionRecording` dans `rackStore`.*
 
 ## [SPEC-18] Atelier de composition (Composer)
 
@@ -784,6 +839,18 @@ Strudler — ne rend alors plus rien du tout.
 
 ---
 
+### Grille de batterie : longueur de boucle
+
+**[SPEC-18.32] La grille couvre la boucle entière, pas seulement le premier cycle.** Une chaîne de mini-notation dure **un cycle** (4 temps) : une boucle de 8 temps ne peut s'écrire, dans le sous-ensemble éditable [SPEC-18.10], qu'en ralentissant l'ensemble. Ce facteur `.slow(n)` **appartient donc à la grille** au lieu de rester dans le suffixe opaque — sans quoi l'éditeur restait bloqué sur les quatre premiers temps d'une boucle plus longue, en silence : le piano roll montrait huit temps et la grille en proposait quatre.
+
+- La grille porte un nombre de **cycles** ; sa longueur affichée est `4 × cycles` temps, et la résolution se lit « n pas par temps · N temps » — plus « 4 temps par cycle », qui était faux dès que la boucle dépassait un cycle.
+- **Étendre conserve la durée du pas** : passer de 4 à 8 temps **double le nombre de colonnes** et laisse les nouvelles vides, au lieu de ralentir ce qui est déjà écrit. C'est le sens de « ma boucle fait 8 temps, je veux écrire les temps 5 à 8 ».
+- Le facteur est écrit **en tête de chaîne** (`s("…").slow(2).gain(0.6)`) et relu où qu'il soit dans la chaîne ; un `.slow(x)` ou `.slow(1.5)` reste **opaque**, la grille ne sachant pas le réécrire fidèlement.
+- Au-delà des 64 pas affichables, l'extension est **refusée avec sa raison** [SPEC-14.3] plutôt qu'ignorée.
+- La grille ne s'aligne **jamais d'elle-même** sur la longueur déclarée de la piste : ouvrir un outil ne doit pas réécrire le pattern (le code reste la source de vérité). L'écart est **énoncé** — « la piste déclare 8 temps, la grille en couvre 4 » — avec un bouton pour l'appliquer.
+
+*Impl. : `cycles` dans `DrumGrid`, `extractCycles`/`chainCalls`/`setCycles`/`cyclesFit`/`gridBeats` et `stepsPerBeat(steps, cycles)` dans `core/composer/drumGrid.ts`, sélecteur « Temps » + rappel de l'écart dans `DrumGrid.svelte`, prop `beats` passée par `Composer.svelte`.*
+
 ### Limites
 
 **[SPEC-18.18] Contrôleurs matériels : hors périmètre initial.** L'atelier est piloté **souris/clavier**. Si les deux pages sont ouvertes simultanément, elles ouvrent les mêmes ports MIDI : les entrées se partagent, mais les **sorties LED entreraient en conflit** (deux pages écrivant l'état des pads). Piloter la grille de batterie depuis l'APC reste envisageable, mais suppose de traiter d'abord cette exclusivité.
@@ -821,3 +888,43 @@ Côté MIDI, la même avance est exploitée par l'horodatage de `MIDIOutput.send
 **[SPEC-19.9] Réglages.** Sortie MIDI (on/off, port, canal) et sortie WebSocket (on/off, URL) vivent dans la modale MIDI/Session — aucune page, aucun encombrement de la surface de jeu [SPEC-17.2] — et sont **persistés** (clé `cues`).
 
 *Impl. : `src/core/cues/` (`types.ts`, `CueBus.ts`, `MidiCueOut.ts`, `WsCueOut.ts`), `src/stores/cuesStore.ts`, `StrudelEngine.onTrigger`/`onTriggerError`/`audioTimeToEpochMs` + `defaultOutput` enrobé, `MidiService.sendAt`, section « Sortie scénique » de `SettingsModal.svelte`, `scripts/cue-monitor.mjs`, script `cues:monitor`.*
+
+---
+
+## [SPEC-20] Sets de pads
+
+**[SPEC-20.1] Intention.** Les 64 pads de l'APC ne portent plus une seule grille de loops mais **un set parmi plusieurs**, commutable au pied levé pendant le jeu. Un set est une configuration de jeu complète (couplet, refrain, break, autre morceau) ; passer de l'un à l'autre ne doit demander ni souris, ni arrêt, ni réassignation.
+
+**[SPEC-20.2] Un set est un preset complet du rack.** Il porte la grille 8×8 (piste, override de live-coding, armement) **et** l'état des canaux : catégories, volume, filtre bipolaire, effets et quantisation [SPEC-17.17]. Deux conséquences sont assumées :
+- à la commutation, les valeurs de canal du set entrant sont poussées dans le moteur, donc **un volume ou un effet peut sauter**. Aucun fader physique n'est « tiré » pour autant : la reprise douce [SPEC-17.30] suit la propriété *par valeur*, donc elle se ré-arme d'elle-même et le fantôme [SPEC-17.29] montre l'écart à combler ;
+- il n'y a **qu'un canal audio par colonne** (un orbit, [SPEC-17.37]). Les loops d'un autre set qui continuent de tourner [SPEC-20.4] sont donc mises à l'échelle par les volumes et les effets du set **courant**. La *forme* de leur chaîne (insertion conditionnelle des effets, [SPEC-17.53]) reste en revanche celle du set qui les a lancées, jusqu'à réévaluation. Des orbits par set seraient le seul moyen de séparer les deux, au prix de 8 × N bus d'effets.
+
+**[SPEC-20.3] Commutation depuis l'APC.** Les deux premiers boutons de la colonne de droite passent d'un set à l'autre : **CLIP STOP (note 112) = set précédent**, **SOLO (note 113) = set suivant**. La navigation **ne boucle pas** : sur le premier set « précédent » ne fait rien, sur le dernier « suivant » non plus. Une liste de sets est linéaire, et l'enroulement enverrait à l'autre extrémité — exactement le mauvais set, irrécupérable en un seul appui. Intents `setPrev` / `setNext` / `setSelect` — même surface unifiée que le reste [PLAN B]. Les fonctions qui occupaient ces notes (quantisation globale, fenêtre −) **et leurs voisines** (fenêtre +, resync) **quittent le mapping de l'APC** : elles restent sur le nanoKONTROL2 (CYCLE, TRACK ◄ ►, MARKER SET) et dans la GUI, où elles étaient déjà. Les notes 114-119 sont libres.
+
+**[SPEC-20.4] Une commutation ne coupe jamais ce qui joue.** Elle change **uniquement l'adressage des pads** : les loops actives d'un set continuent de tourner quand on le quitte, et **il faut y revenir pour les arrêter** — c'est le geste voulu, pas une limitation. Une voix est donc identifiée par `(set, canal, slot)` et non plus par `(canal, slot)`, et une bascule quantisée en attente [SPEC-8.4] **retient le set de son appui** : elle se déclenche à la fenêtre prévue même si l'on a changé de set entre-temps.
+
+**[SPEC-20.5] Une activité hors du set courant est signalée.** Sur le matériel, les deux boutons de commutation ne disposent que de **trois états**. ⚠ **Constaté sur l'appareil** (le bouton reste vert quelle que soit la valeur envoyée) : les boutons **hors grille** de l'APC mini mk2 (rangée du bas, colonne de droite) sont des LED **monochromes** qui acceptent uniquement **0 = éteint, 1 = allumé, 2 = clignotant**, sur le canal de note 0 ; elles ignorent la palette de couleurs **et** les canaux de luminosité, qui sont des propriétés des 64 pads RGB seuls. Envoyer un index de palette y allume le bouton dans sa couleur fixe quelle que soit la valeur — vert en continu. La **couleur du set de destination n'est donc pas affichable là** : elle vit à l'écran, portée par les vignettes voisines de la barre des sets. Ce que les boutons peuvent dire, ils le disent : **éteint** = rien de ce côté (bout de liste, l'appui ne fait rien [SPEC-20.3]) · **allumé** = un set à atteindre · **clignotant** = des loops tournent encore dans un autre set. Le badge `⟳N` à l'écran nomme ce set et y conduit. À l'écran, la vignette du set porte un badge `⟳N` (N loops actives) et **cliquer le badge y conduit** — puisque c'est le seul endroit d'où les arrêter. Sans ce signal, un son sans pad allumé serait inexplicable.
+
+**[SPEC-20.6] Couleur et nom.** Chaque set porte un nom libre et une couleur, qui devient la **couleur de repos des 64 pads** (pad dont la loop est associée mais non active) ; les états (en lecture, départ/arrêt en attente) gardent leur code couleur [SPEC-17.15/17.16]. La palette compte 8 couleurs, chacune définie par son hex (GUI) et son index de palette APC ; les couleurs d'**état** en sont **exclues** (vert 21 = en lecture, rouge 5 = arrêt en attente), sans quoi un set pourrait se déguiser en état. La GUI reprend la même couleur sur les slots au repos, pour que l'écran et le matériel racontent la même chose.
+
+**[SPEC-20.7] Édition réservée au transport arrêté.** Ajouter, supprimer, réordonner, renommer un set ou changer sa couleur n'est possible que **transport arrêté** — c'est-à-dire hors replay live, le chronomètre étant le bouton PLAY/STOP [SPEC-17.49]. En lecture, seule la commutation reste. Une tentative d'édition est **refusée visiblement** [SPEC-14.3], jamais ignorée en silence.
+
+**[SPEC-20.8] Un set ne se supprime que vide.** Vide = aucun de ses 64 pads n'est associé à une piste. Le dernier set restant n'est jamais supprimable : le rack doit toujours avoir un set courant.
+
+**[SPEC-20.9] Identité stable.** Chaque set porte un `id` immuable, distinct de sa position. Voix, bascules en attente et scènes s'y réfèrent, donc **un réordonnancement ne délie rien** — même exigence que pour les identifiants de pistes [SPEC-17.51].
+
+**[SPEC-20.10] Barre de sets dense.** Une seule ligne au-dessus du rack : pastille de couleur, nom, badge `⟳N`, set courant encadré à sa couleur. Transport arrêté, la même ligne porte l'édition (＋, ✕, ◄ ►, renommage en place, choix de couleur) ; en lecture ces affordances sont désactivées avec leur raison en infobulle. Aucune modale, aucun scroll [SPEC-17.2].
+
+**[SPEC-20.11] Les scènes deviennent multi-sets.** Étend [SPEC-17.36]/[SPEC-17.52] : une scène capture les slots armés **de tous les sets** (clés `set:canal:slot`), le set courant, et la quantisation des canaux de ce set. Une scène qui n'aurait connu que le set courant rappellerait une partie de ce qui sonne, ce qui est pire qu'inutile en live. Au rappel, le set capturé redevient courant. Les scènes enregistrées au format précédent sont **migrées** sur le premier set. Corollaire : l'intent `slotToggle` porte un champ `set` **optionnel** (absent = set courant), afin que le journal de gestes [SPEC-11] reste rejouable à l'identique.
+
+**[SPEC-20.12] Persistance.** La clé `rack` devient `{ version: 2, activeSet, sets: [{ id, name, color, channels }] }` ; un **tableau** (forme antérieure) est migré en un set unique « Set 1 ». Les sessions passent en `SESSION_VERSION` 2 (`initialSets`), une session v1 étant migrée de la même façon. Le miroir disque restant **générique** sur le préfixe `strudler:` [SPEC-13.5], il n'y a rien à y déclarer.
+
+*Impl. : `src/core/channels/sets.ts` (palette, `PadSet`, migration), sets dans `core/channels/ChannelRack.ts`, clé de voix `(set, canal, slot)` dans `StrudelEngine.setVoice`, set retenu par les bascules en attente dans `core/launch/Launcher.ts`, `setPrev`/`setNext`/`setSelect` dans `core/intent/intents.ts` + `core/mapping/mapping.ts` (notes 112/113, couleur de repos, clignotement), `padSets`/`activeSetIndex`/`foreignPlaying` + édition + scènes multi-sets dans `src/stores/rackStore.ts`, `src/lib/SetBar.svelte`, teinte des slots au repos dans `src/lib/ChannelRack.svelte`.*
+
+**[SPEC-20.13] La sortie scénique suit tous les sets.** Corrige [SPEC-19.6] à l'arrivée des sets. Les cues `slot` étaient déduits de l'instantané du **set courant** : une commutation, qui remplace la grille entière sans rien changer d'audible, aurait donc émis une **rafale de faux** « arrêté / démarré » vers le récepteur. Ils sont désormais déduits de l'ensemble des slots **armés, tous sets confondus**, et chaque cue porte l'**id et le nom du set** (ajout compatible, la version du protocole ne change pas). Le premier instantané reste une **référence** et non une suite de changements ; le test se fait sur un drapeau explicite et non sur la taille de la table, sans quoi le tout premier armement de la session — l'état de départ étant vide — passerait à la trappe.
+
+*Impl. : `ChannelRack.armedDetail()` + `ArmedSlot`, `armedSlots` dans `rackStore`, `subscribeSlots` dans `cuesStore`, champs `set`/`setName` du cue `slot` dans `core/cues/types.ts`.*
+
+**[SPEC-20.14] Luminosité des pads : nuit ⇄ jour, sur SHIFT.** En pleine lumière, un pad **associé mais inactif** est illisible : sa couleur de repos [SPEC-20.6] est envoyée à **10 %** de luminosité, ce qui est le bon réglage dans une salle sombre et rien du tout sur une scène éclairée. Le bouton **SHIFT** de l'APC bascule donc entre deux profils : **nuit** (repos à 10 %) et **jour** (repos à **75 %**). Les autres états gardent leur codage — en lecture à 100 %, bascule en attente clignotante — donc le dégradé et le sens de chaque état survivent au changement. Sur l'APC mini mk2 la luminosité est portée par le **canal de note**, pas par la vélocité : le profil ne change donc que le canal, la couleur reste celle du set. Le profil est **persisté** (la lumière d'une salle ne change pas entre deux rechargements) et doublé d'un bouton **☀/🌙** dans la barre de transport, puisqu'un réglage qu'on ne peut faire que sur le matériel serait invisible pour qui règle l'écran d'abord. ⚠ Le code de SHIFT (**note 122**) reste **à confirmer sur l'appareil** ; le moniteur MIDI [SPEC-17.35] nomme le code de tout appui non mappé, donc une autre valeur ne coûte qu'une ligne.
+
+**[SPEC-20.15] Le volume ne suit pas les sets.** Corrige [SPEC-20.2]. Un volume de canal est une **position de main**, pas un réglage de morceau : le voir sauter en changeant de set pendant un jeu est le contraire de ce qu'on veut, d'autant qu'un fader physique reste alors décalé jusqu'à sa reprise [SPEC-17.30]. Le niveau est donc **commun à tous les sets** : régler le volume l'écrit dans **chaque** set. Écrire partout plutôt que « ne pas appliquer au changement » est ce qui garde l'état **persisté d'accord avec ce qu'on entend**, quel que soit le set actif — sinon chaque set conserverait une copie périmée qui ressortirait au prochain rechargement. Un set **créé** naît au niveau courant, et un état enregistré **avant** cette règle est nivelé sur le set actif au chargement. Filtre et effets, eux, restent attachés au set [SPEC-20.2].

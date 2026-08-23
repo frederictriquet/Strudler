@@ -33,6 +33,9 @@
     gateActive,
     phaserActive,
     echoActive,
+    ledMode,
+    toggleLedMode,
+    wakeLockHeld,
   } from '@stores/rackStore';
   import { openSettings } from '@stores/uiStore';
   import { MIN_BPM, MAX_BPM } from '@core/clock/Clock';
@@ -40,6 +43,7 @@
   import { ECHO_BEATS } from '@core/engine/StrudelEngine';
   import TransportTimer from '@lib/TransportTimer.svelte';
   import { CAMELOT_WHEEL, shortNote, shortNoteFr } from '@core/music/camelot';
+  import { LAUNCH_META } from '@core/channels/types';
 
   // Slider covers the usual range; the number input allows the full clock range.
   const SLIDER_MIN = 80;
@@ -57,14 +61,18 @@
   const storeMode = sceneStoreMode;
   const active = activeScene;
   const drop = dropActive;
+  const led = ledMode;
+  const wake = wakeLockHeld;
   const filter = filterHold;
   const gate = gateActive;
   const phaser = phaserActive;
   const echo = echoActive;
 
-  // Global quantize view derived from per-channel state. [SPEC-17.17]
-  $: anyQuantized = $channels.some((c) => c.quantized);
-  $: allQuantized = $channels.length > 0 && $channels.every((c) => c.quantized);
+  // Global launch view derived from per-channel state. [SPEC-17.17/17.60]
+  $: commonLaunch =
+    $channels.length > 0 && $channels.every((c) => c.launch === $channels[0].launch)
+      ? $channels[0].launch
+      : null;
 
   function onKey(e: Event) {
     const value = (e.currentTarget as HTMLSelectElement).value;
@@ -129,22 +137,25 @@
 
     <button
       class="mode"
-      class:quantized={allQuantized}
-      class:mixed={anyQuantized && !allQuantized}
+      class:quantized={commonLaunch === 'quantized'}
+      class:fade={commonLaunch === 'fade'}
+      class:mixed={commonLaunch === null}
       onclick={() => dispatch({ type: 'modeToggle' })}
       title="Quantisation de TOUS les canaux (par canal : bouton ⚡/⏱ de chaque canal, ou bouton du bas de l'APC)"
     >
-      {allQuantized ? '⏱ Quantisé' : anyQuantized ? '⏱ Mixte' : '⚡ Immédiat'}
+      {commonLaunch === null
+        ? '⏱ Mixte'
+        : `${LAUNCH_META[commonLaunch].glyph} ${LAUNCH_META[commonLaunch].name}`}
     </button>
 
     <div class="window">
       <span class="wlabel">Fenêtre</span>
       <button onclick={() => dispatch({ type: 'windowPrev' })} title="TRACK ◄" aria-label="Fenêtre −"
-        >◄</button
+        >◂</button
       >
       <span class="wval">{$launch.window}</span>
       <button onclick={() => dispatch({ type: 'windowNext' })} title="TRACK ►" aria-label="Fenêtre +"
-        >►</button
+        >▸</button
       >
       <span class="wunit">beats</span>
     </div>
@@ -161,7 +172,7 @@
     <div class="nudge" title="Décaler la phase pour s'aligner sur un mix externe (nano MARKER ◄ ►)">
       <button
         onclick={() => dispatch({ type: 'gridNudge', beats: -NUDGE_BEATS })}
-        aria-label="Reculer la phase">◄</button
+        aria-label="Reculer la phase">◂</button
       >
       <button
         class="nval"
@@ -173,7 +184,7 @@
       </button>
       <button
         onclick={() => dispatch({ type: 'gridNudge', beats: NUDGE_BEATS })}
-        aria-label="Avancer la phase">►</button
+        aria-label="Avancer la phase">▸</button
       >
     </div>
 
@@ -313,6 +324,28 @@
     </div>
 
     <div class="row-right">
+      <!-- Only while the lock is actually held: the point is to know that the
+           screen will stay on, not to promise it. [SPEC-17.58] -->
+      {#if $wake}
+        <span
+          class="wake"
+          title="Veille bloquée pendant la lecture (l'écran reste allumé). Relâchée au STOP, et par le navigateur si l'onglet passe à l'arrière-plan."
+        >
+          veille bloquée
+        </span>
+      {/if}
+      <!-- Pad brightness, mirroring the APC's SHIFT button. A resting pad at 10 %
+           disappears in daylight and blinds in a dark room. [SPEC-20.14] -->
+      <button
+        class="ledmode"
+        class:day={$led === 'day'}
+        onclick={toggleLedMode}
+        title={$led === 'day'
+          ? 'Pads en luminosité JOUR — clic (ou SHIFT sur l’APC) pour repasser en nuit'
+          : 'Pads en luminosité NUIT — clic (ou SHIFT sur l’APC) pour la lumière du jour'}
+      >
+        {$led === 'day' ? '☀ Jour' : '🌙 Nuit'}
+      </button>
       <button
         class="adv"
         class:on={$advanced}
@@ -410,6 +443,20 @@
   .row-right button {
     font-size: 0.8rem;
     padding: 0.3rem 0.7rem;
+  }
+  /* Sleep is inhibited: stated only while true. [SPEC-17.58] */
+  .wake {
+    font-size: 0.68rem;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.2rem 0.4rem;
+    white-space: nowrap;
+  }
+  /* Pad brightness toggle: amber when the day profile is on. [SPEC-20.14] */
+  .ledmode.day {
+    color: #f0b429;
+    border-color: #f0b429;
   }
   .adv.on,
   .settings:hover {
@@ -603,6 +650,20 @@
     margin: 0.5rem 0 0;
     font-size: 0.9rem;
   }
+  /* Fade-in mode on every channel: blinking, like the buttons themselves. */
+  .mode.fade {
+    color: #6ab6ff;
+    border-color: #6ab6ff;
+    animation: mode-blink 1s steps(2, start) infinite;
+  }
+  @keyframes mode-blink {
+    0% {
+      background: rgba(106, 182, 255, 0.28);
+    }
+    100% {
+      background: transparent;
+    }
+  }
   .mode.quantized {
     border-color: #f0b429;
     color: #f0b429;
@@ -751,9 +812,15 @@
     align-items: center;
     gap: 0.3rem;
   }
+  /* Mirror-image arrows: same box, text presentation (no colour-emoji fallback). */
   .nudge button {
     padding: 0.3rem 0.5rem;
-    font-size: 0.78rem;
+    /* ◂ ▸ are drawn much smaller than ◄ ►, hence the bump: same visual weight as
+       before, without the colour-emoji fallback that broke the pair's symmetry. */
+    font-size: 1.05rem;
+    line-height: 1;
+    min-width: 1.9rem;
+    font-variant-emoji: text;
   }
   .nval {
     font-family: ui-monospace, monospace;
@@ -774,6 +841,10 @@
   }
   .window button {
     padding: 0.3rem 0.55rem;
+    font-size: 1.05rem;
+    line-height: 1;
+    min-width: 2rem;
+    font-variant-emoji: text;
   }
   .wlabel {
     color: var(--muted);

@@ -437,7 +437,7 @@
             onkey={(k) => updateDraft((d) => ({ ...d, key: k }))}
           />
         {:else if activeTool === 'grid'}
-          <DrumGrid pattern={$draft.patternSource} onchange={onGridChange} />
+          <DrumGrid pattern={$draft.patternSource} onchange={onGridChange} beats={$draft.beats} />
         {:else if activeTool === 'euclid'}
           <EuclidWheel oninsert={addAsLayer} />
         {:else if activeTool === 'sounds'}

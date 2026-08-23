@@ -49,6 +49,56 @@ dès le premier lancement.
   le logiciel Elgato. MK.2 : colonnes 1-4 = canaux, lignes = slots S/M/R, colonne 5 = mode/fenêtre.
   Chaque touche s'éclaire selon l'état de la piste. ⚠ Matériel non validé (calage par modèle).
 
+### Sets de pads `[SPEC-20]`
+
+Les 64 pads de l'APC portent **un set parmi plusieurs** (couplet, refrain, break…) — chacun est un
+preset complet du rack : grille, volumes, filtres, effets, quantisation.
+
+- **CLIP STOP** (note 112) = set précédent, **SOLO** (note 113) = set suivant — **sans bouclage** (sur le premier set, « précédent » ne fait rien). Les fonctions
+  qui occupaient ces boutons (quantisation globale, fenêtre −/+, resync) restent sur le nano
+  (CYCLE, TRACK ◄ ►, MARKER SET) et dans la GUI ; les notes 114-119 sont libres.
+- Un switch **ne coupe rien** : les loops d'un set continuent quand on le quitte, et il faut y
+  **revenir** pour les arrêter. Les boutons de set **clignotent** et la barre affiche `⟳N` tant que
+  c'est le cas — cliquer le badge conduit au set concerné.
+- Les deux boutons sont des LED **monochromes** (mesuré : la colonne de droite ignore la palette,
+  seuls les 64 pads sont RGB), d'où trois états seulement : **éteint** = rien de ce côté (sur le
+  premier set, CLIP STOP est éteint) · **allumé** = un set à atteindre · **clignotant** = des loops
+  tournent dans un autre set. La couleur des sets se lit à l'écran, sur la barre des sets.
+- La **couleur** du set est la couleur de repos de ses 64 pads (association sans lecture), à l'écran
+  comme sur l'APC. Nom et couleur s'éditent dans la barre au-dessus du rack.
+- Ajouter / supprimer / réordonner / renommer : **transport arrêté uniquement**. Un set ne se supprime
+  que **vide**, et jamais le dernier.
+- **SHIFT** bascule la luminosité des pads : **nuit** (repos à 10 %) ⇄ **jour** (repos à 75 %), pour
+  qu'un pad associé mais inactif reste lisible sur une scène éclairée. Persisté, doublé d'un bouton
+  ☀/🌙 dans la barre de transport. ⚠ Code de SHIFT (note 122) à confirmer sur l'appareil.
+- Le **volume** d'un canal est **commun à tous les sets** `[SPEC-20.15]` : changer de set ne déplace
+  aucun niveau. Filtre et effets, eux, appartiennent au set.
+
+### Lancement par canal — trois états `[SPEC-17.60]`
+
+Le bouton de chaque canal (⚡/⏱ à l'écran, rangée du bas de l'APC) cycle sur trois modes :
+
+| état | LED | comportement |
+|---|---|---|
+| immédiat | éteinte | la loop démarre sous le doigt |
+| quantisé | allumée | départ à la prochaine fenêtre |
+| **fondu** | **clignotante** | départ immédiat, **montée progressive sur une fenêtre** |
+
+Le fondu s'applique à la loop lancée, pas au canal : armer une deuxième loop ne fait pas plonger la
+première. **Couper** une loop la fait descendre sur une fenêtre — son pad clignote en rouge pendant la
+descente, et **un appui l'annule** en remontant depuis où elle en était. Le fondu ne joue qu'en
+**lecture** : transport arrêté, armer et couper sont nets.
+
+### Veille & lampes du transport
+
+- **Pas de veille pendant la lecture** `[SPEC-17.58]` : le verrou *Screen Wake Lock* est pris au PLAY,
+  rendu au STOP, et la barre de transport affiche « veille bloquée » tant qu'il est tenu. Le navigateur
+  le relâche si l'onglet passe à l'arrière-plan (on le redemande au retour) ; il ne couvre ni la
+  fermeture du capot ni une veille explicite.
+- **PLAY / STOP / REC du nano s'allument selon le mode** `[SPEC-17.59]`. REC (CC 45) déclenche aussi
+  l'enregistrement du journal de gestes. ⚠ Le nano n'obéit que si son préréglage est en
+  **LED Mode : External** (Korg Kontrol Editor).
+
 ## Sortie scénique — VJing / lumière `[SPEC-19]`
 
 Strudler sait ce qu'il joue : il **diffuse** tempo, position et frappes vers une autre application,

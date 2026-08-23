@@ -3,6 +3,7 @@
   // MIDI/Session live in a modal opened from the transport toolbar. [SPEC-10]
   import { onMount } from 'svelte';
   import ClockPanel from '@lib/ClockPanel.svelte';
+  import SetBar from '@lib/SetBar.svelte';
   import ChannelRack from '@lib/ChannelRack.svelte';
   import LibraryPanel from '@lib/LibraryPanel.svelte';
   import CodePanel from '@lib/CodePanel.svelte';
@@ -62,6 +63,11 @@
 <main>
   <div class="transport">
     <ClockPanel />
+  </div>
+
+  <!-- Which set the 64 pads address, on one dense line. [SPEC-20.10] -->
+  <div class="setbar">
+    <SetBar />
   </div>
 
   <div class="rack">

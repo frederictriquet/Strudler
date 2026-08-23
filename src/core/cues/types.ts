@@ -61,9 +61,12 @@ export type Cue =
       gain: number;
       at: number;
     }
-  /** A slot was armed or stopped. */
+  /** A slot was armed or stopped, in the pad set named by `set`. [SPEC-20.13] */
   | {
       type: 'slot';
+      /** Stable id of the pad set holding the slot, and its display name. */
+      set: string;
+      setName: string;
       channel: number;
       category: string | null;
       slot: number;

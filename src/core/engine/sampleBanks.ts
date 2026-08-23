@@ -68,6 +68,23 @@ export const REPL_BANKS: SampleBank[] = [
   { label: 'mridangam', url: `${CDN}/mridangam.json`, base: `${CDN}/mrid/` },
 ];
 
+/**
+ * Name under which superdough actually registers — and looks up — a sound.
+ * [SPEC-17.56.1]
+ *
+ * Measured in `superdough/dist/index.mjs`: `registerSound` stores
+ * `name.toLowerCase().replace(/\s+/g, '_')`, and `getSound` reads
+ * `soundMap.get()[name.toLowerCase()]`. A name differing only by case therefore
+ * PLAYS PERFECTLY while a raw string comparison against the registry says it does
+ * not exist — which is exactly what flagged every drum machine (`BossDR110_cr`,
+ * `RolandTR909_bd`: 71 machines of camel-cased names) as unknown.
+ *
+ * Any comparison with the registry must go through this function, on BOTH sides.
+ */
+export function normalizeSoundName(name: string): string {
+  return name.toLowerCase().replace(/\s+/g, '_');
+}
+
 let registered = false;
 
 /**

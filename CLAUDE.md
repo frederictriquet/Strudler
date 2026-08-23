@@ -39,7 +39,7 @@ src/core/      logique métier, ZÉRO dépendance à l'UI
   engine/      StrudelEngine — Strudel isolé derrière une interface stable
   clock/       horloge maître (BPM, beats ; 1 cycle = 4 beats)
   library/     pistes YAML scannées via import.meta.glob (?raw) + parse/validate
-  channels/    ChannelRack — canaux, slots, volume, filtre, overrides de code
+  channels/    ChannelRack — sets de pads, canaux, slots, volume, filtre, overrides
   launch/      Launcher — mode immédiat/quantisé, fenêtre W, pending
   midi/ mapping/ streamdeck/   contrôleurs → Intent
   cues/        sortie scénique — bus de cues + puits MIDI / WebSocket [SPEC-19]
@@ -62,6 +62,16 @@ vite-plugins/  soundsServer.ts — sert ~/Music/Sounds sous /sounds/ + génère 
   sauvegardée sans rien déclarer. Ne jamais court-circuiter `saveJson()` avec un
   `localStorage.setItem()` direct : la donnée sortirait du miroir.
 - Transport **PLAY/STOP** `[SPEC-17.9]` : activer un slot **arme** la piste (silencieuse) ; le son ne part qu'au PLAY. Interagir ne déclenche jamais de son tout seul. Le **chronomètre est le bouton PLAY/STOP** `[SPEC-17.49]`, et l'audio est déverrouillé par une **modale au démarrage** `[SPEC-17.50]` (le navigateur exige un clic ; un message MIDI ne compte pas).
+- **Sets de pads** `[SPEC-20]` : les 64 pads adressent **un set parmi plusieurs**, commuté par
+  CLIP STOP / SOLO (notes 112/113, **sans bouclage**). Un set porte la grille, le filtre, les effets
+  et la quantisation — **pas le volume**, commun à tous les sets `[SPEC-20.15]` pour qu'un changement
+  de set ne déplace aucun niveau. Une voix est identifiée par `(set, canal, slot)` : quitter un set
+  **ne coupe pas** ses loops, il faut y revenir. L'édition des sets (ajout/suppression/réordre/nom/
+  couleur) est réservée au **transport arrêté**. SHIFT bascule la luminosité des pads `[SPEC-20.14]`.
+- Le bouton de lancement d'un canal a **trois** états `[SPEC-17.60]` : immédiat (LED éteinte),
+  quantisé (allumée), **fondu** (clignotante) — la loop monte alors sur la durée d'une fenêtre, via un
+  `ref` de gain **propre à la voix** (fondre le canal ferait plonger ce qui joue déjà). La coupure fond
+  aussi ; un appui pendant la descente l'annule. Le fondu n'existe qu'**en lecture** `[SPEC-17.60.2]`.
 - Volume et filtre sont modifiés à chaud via des `ref` Strudel (pas de ré-évaluation du pattern).
 - Ajouter une piste ou un son ne demande aucune modification du moteur ni de la GUI.
 - **Sortie scénique** `[SPEC-19]` : Strudler **émet** (MIDI clock/notes, WebSocket JSON), il ne rend ni visuels ni DMX. Le canal d'une frappe se lit dans son `orbit` (`.orbit(canal + 1)`, `[SPEC-17.37]`) — rien à instrumenter. Un navigateur ne peut ni émettre d'UDP ni écouter sur un port : OSC/Art-Net/Ableton Link exigeraient un pont Node.
@@ -87,7 +97,16 @@ chaque appel reste lent, **une seule sonde qui répond à toutes les questions**
 
 - `initAudioOnFirstClick()` doit être appelé **au montage** (`engine.arm()` dans `onMount`), pas dans un handler de clic — il n'écoute que le `mousedown` *suivant*.
 - `repl.evaluate()` **avale les erreurs** : passer `onEvalError` et vérifier la valeur de retour.
+- Le transpileur réécrit **tout littéral chaîne** du code évalué en mini-notation (`fadeg("a:b")` →
+  `fadeg(m('a:b', …))`). Tout argument passé à une fonction du scope (`chgain`, `fadeg`…) DOIT donc
+  être **numérique** `[SPEC-17.60.1]` — sinon la fonction reçoit un Pattern et échoue sans un mot.
 - `registerSynthSounds()` ne charge que les synthés ; les samples exigent la map `/sounds/strudel.json` — sinon silence.
+- superdough **normalise** les noms de sons (`toLowerCase`, espaces → `_`) à l'enregistrement **et**
+  à la lecture : `BossDR110_cr` vit dans le registre sous `bossdr110_cr`. Toute comparaison au
+  registre passe donc par `normalizeSoundName` `[SPEC-17.56.1]`, sinon les 71 boîtes à rythmes en
+  casse mixte sont déclarées inconnues alors qu'elles jouent.
+- Une chaîne de mini-notation dure **un cycle** : une boucle plus longue s'écrit `.slow(n)`, facteur
+  que la grille de batterie **possède** `[SPEC-18.32]` au lieu de le laisser dans le suffixe opaque.
 - Un **nom de son inconnu** ne lève rien : superdough joue du silence. Le piano roll, lui, affiche
   les notes (il vient de `queryEvents`, sans audio) — d'où « ça montre les notes mais je n'entends
   rien ». L'atelier compare désormais les noms au registre `[SPEC-17.56]`.
@@ -108,6 +127,19 @@ chaque appel reste lent, **une seule sonde qui répond à toutes les questions**
 - Modifier `vite-plugins/soundsServer.ts` n'est **pas** pris par le HMR → redémarrer `npm run dev`.
 - Le port est **verrouillé** (`strictPort`) `[SPEC-13.6]` : un second `npm run dev` échoue au lieu
   de glisser sur `:5174`, où l'application afficherait un état vide (autre origine).
+- Les notes **112/113** de l'APC ne font plus « quantisation globale / fenêtre − » mais **changent de
+  set** `[SPEC-20.3]` ; ces fonctions ont quitté l'APC (nano + GUI). Les notes 114-119 sont libres.
+- Les boutons **hors grille** de l'APC (rangée du bas 100-107, colonne de droite 112-119) sont des
+  LED **monochromes** : 0/1/2 (éteint/allumé/clignotant) sur le canal de note 0, palette et canaux
+  de luminosité **ignorés** — ce sont des propriétés des 64 pads RGB seuls `[SPEC-20.5]`. Y envoyer
+  un index de couleur allume le bouton en vert continu.
+- Un **switch de set** ne modifie que l'adressage des pads. Comme un set porte aussi les volumes et
+  les effets `[SPEC-20.2]`, ils sont poussés dans le moteur au switch (un niveau peut sauter), et
+  les loops d'un autre set qui tournent encore sont mises à l'échelle par le canal **courant** — il
+  n'y a qu'un orbit par colonne `[SPEC-17.37]`.
+- Les LED du **nanoKONTROL2** n'obéissent que si son préréglage est en **LED Mode : External**
+  (Korg Kontrol Editor) — sinon l'appareil les pilote lui-même et tout ce qu'on envoie est ignoré
+  `[SPEC-17.59]`.
 - Fermer le logiciel Elgato avant de connecter le Stream Deck (monopolise le HID).
 - Les pistes sont des **données YAML** `[SPEC-4.6]` : renommer/déplacer un fichier change l'id `catégorie/slug` et **délie les pads** (l'association est conservée et signalée, jamais purgée `[SPEC-17.51]`). Le `#` d'un nom d'accord (`G#m`) n'ouvre pas de commentaire YAML tant qu'il n'est pas précédé d'une espace.
 
@@ -119,5 +151,5 @@ sur une même ligne (flex-wrap), modales pour le secondaire (MIDI/Session/Régla
 
 ## État
 
-Phases 0→10 du plan livrées, build vert. ⚠ **APC mini mk2 et Stream Deck non validés sur matériel.**
+Phases 0→10 du plan livrées + sets de pads `[SPEC-20]`, build vert. ⚠ **APC mini mk2 et Stream Deck non validés sur matériel.**
 Évolutions possibles : `[SPEC-15]` (dont l'export d'une piste live-codée vers `library/`).

@@ -13,7 +13,11 @@ export type Intent =
   | { type: 'channelFxToggle'; channel: number } // nano M → on/off focused [SPEC-17.28]
   | { type: 'channelFxKnob'; channel: number; value: number } // p1 of focused fx [SPEC-17.23]
   | { type: 'channelFxFader'; channel: number; value: number } // p2 of focused fx [SPEC-17.23]
-  | { type: 'slotToggle'; channel: number; slot: number } //          [SPEC-7.3]
+  // [SPEC-7.3] Toggle a pad. `set` names the pad set it belongs to; absent =
+  // the current set. Only a scene recall [SPEC-20.11] or a replayed journal
+  // [SPEC-11] ever names another one — a hand or a controller always means the
+  // set under the pads.
+  | { type: 'slotToggle'; channel: number; slot: number; set?: string }
   | { type: 'modeToggle' } //             toggle quantize on ALL channels [SPEC-7.5]
   | { type: 'channelModeToggle'; channel: number } // per-channel quantize [SPEC-17.17]
   | { type: 'windowPrev' } //                                          [SPEC-7.6]
@@ -26,9 +30,15 @@ export type Intent =
   | { type: 'gateHold'; on: boolean } // held rhythmic gate [SPEC-17.44]
   | { type: 'phaserHold'; on: boolean } // held global phaser [SPEC-17.46]
   | { type: 'echoHold'; beats: number; on: boolean } // held tempo-locked echo [SPEC-17.47]
+  // Pad sets: the two first buttons of the APC's right column. [SPEC-20.3]
+  | { type: 'setPrev' } //                        previous pad set (APC CLIP STOP)
+  | { type: 'setNext' } //                        next pad set (APC SOLO)
+  | { type: 'setSelect'; index: number } //       GUI: jump to a set by position
+  | { type: 'ledModeToggle' } //   pad brightness night ⇄ day (APC SHIFT) [SPEC-20.14]
   | { type: 'sceneModeToggle' } //     arm/disarm scene storing (Stream Deck M+) [SPEC-17.36]
   | { type: 'scenePress'; index: number } // store or recall scene `index`   [SPEC-17.36]
   | { type: 'transportStart' } //                 (re)start the master clock (nano PLAY)
-  | { type: 'transportStop' }; //                 stop everything / silence (nano STOP)
+  | { type: 'transportStop' } //                  stop everything / silence (nano STOP)
+  | { type: 'sessionRecordToggle' }; //  start/stop the gesture journal (nano REC) [SPEC-17.59]
 
 export type IntentType = Intent['type'];

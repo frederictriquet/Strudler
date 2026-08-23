@@ -7,6 +7,7 @@
 
 import type { Clock } from '@core/clock/Clock';
 import type { ChannelRack } from '@core/channels/ChannelRack';
+import { parseSlotRef, slotRef } from '@core/channels/sets';
 
 export type LaunchMode = 'immediate' | 'quantized';
 
@@ -60,27 +61,34 @@ export class Launcher {
     for (const l of this.listeners) l(s);
   }
 
-  private key(channel: number, slot: number): string {
-    return `${channel}:${slot}`;
+  // A pending toggle remembers the pad set it was pressed in, so it fires where
+  // it was aimed even if the performer switched set meanwhile. [SPEC-20.4]
+  private key(channel: number, slot: number, setId: string): string {
+    return slotRef(setId, channel, slot);
   }
 
   /** [SPEC-7.4/17.17] Route a slot toggle: immediate, or queued to the window,
-   *  based on THIS channel's quantization setting. */
-  requestSlotToggle(channel: number, slot: number): void {
-    if (!this.rack.isChannelQuantized(channel)) {
-      this.clearPending(channel, slot);
-      void this.rack.toggleSlot(channel, slot);
+   *  based on THIS channel's quantization setting. `setId` defaults to the set the
+   *  pads currently address; an explicit one comes from a scene recall or a
+   *  replayed journal. [SPEC-20.11] */
+  requestSlotToggle(channel: number, slot: number, setId?: string): void {
+    const set = setId ?? this.rack.activeSetId;
+    // Only the quantized mode queues. `fade` starts at once and rises over a
+    // window instead of waiting for one. [SPEC-17.60]
+    if (this.rack.channelLaunch(channel, set) !== 'quantized') {
+      this.clearPending(channel, slot, set);
+      void this.rack.toggleSlot(channel, slot, set);
       return;
     }
     // Quantized: second press before it fires cancels it. [SPEC-8.4, Q2]
-    const key = this.key(channel, slot);
+    const key = this.key(channel, slot, set);
     if (this.pending.has(key)) {
       this.pending.delete(key);
-      this.rack.setPending(channel, slot, false);
+      this.rack.setPending(channel, slot, false, set);
       return;
     }
     this.pending.set(key, this.nextBoundary());
-    this.rack.setPending(channel, slot, true);
+    this.rack.setPending(channel, slot, true, set);
   }
 
   /** Next beat b > now with (b - origin) ≡ 0 (mod W). [SPEC-8.2] */
@@ -107,9 +115,11 @@ export class Launcher {
     for (const [key, target] of this.pending) {
       if (beat < target - lead) continue;
       this.pending.delete(key);
-      const [channel, slot] = key.split(':').map(Number);
-      this.rack.setPending(channel, slot, false);
-      void this.rack.toggleSlot(channel, slot);
+      const ref = parseSlotRef(key);
+      if (!ref) continue; // malformed key: never fire on a guess
+      const { setId, channel, slot } = ref;
+      this.rack.setPending(channel, slot, false, setId);
+      void this.rack.toggleSlot(channel, slot, setId);
     }
   }
 
@@ -118,9 +128,9 @@ export class Launcher {
     return LOOKAHEAD_SECONDS * (this.clock.currentBpm / 60);
   }
 
-  private clearPending(channel: number, slot: number): void {
-    if (this.pending.delete(this.key(channel, slot))) {
-      this.rack.setPending(channel, slot, false);
+  private clearPending(channel: number, slot: number, setId: string): void {
+    if (this.pending.delete(this.key(channel, slot, setId))) {
+      this.rack.setPending(channel, slot, false, setId);
     }
   }
 

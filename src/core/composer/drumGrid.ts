@@ -52,8 +52,19 @@ export const BEATS_PER_CYCLE = 4;
 export interface DrumGrid {
   /** One row per sound, in order of first appearance. `bd`, `cp:1`, … */
   sounds: string[];
-  /** Number of columns. One cycle = 4 beats, so `steps / 4` steps per beat. */
+  /** Number of columns, spread over `cycles` cycles — so `steps / (4 × cycles)`
+   *  steps per beat. */
   steps: number;
+  /**
+   * How many 4-beat cycles the grid spans. [SPEC-18.32]
+   *
+   * A mini-notation string always lasts ONE cycle, so a loop of 8 beats can only
+   * be written by slowing it down: the grid owns a `.slow(n)` factor instead of
+   * keeping it in the opaque suffix. Without it the editor was stuck on the first
+   * four beats of a longer loop, silently — the piano roll showed eight beats and
+   * the grid offered four.
+   */
+  cycles: number;
   /** `cells[row][step]` — true when that sound is struck on that step. */
   cells: boolean[][];
   /** `s` or `sound`, whichever the pattern used. */
@@ -354,6 +365,72 @@ function readCall(pattern: string): CallParts {
   return { call: match[1], body, suffix };
 }
 
+// ── Loop length: the `.slow(n)` the grid owns [SPEC-18.32] ──────────────────
+//
+// A mini-notation string lasts one cycle. The only way to write a longer loop
+// inside the supported subset is to slow the whole thing down, so that factor
+// belongs to the grid — kept in the opaque suffix, it left the editor blind to
+// everything past beat 4.
+
+/** Beyond this the grid is unreadable anyway (64 steps over 16 beats). */
+const MAX_CYCLES = 4;
+
+/** Split a chained suffix into its top-level `.name(args)` calls, quotes and
+ *  nested parentheses respected. Returns null when it is not a plain chain. */
+function chainCalls(suffix: string): string[] | null {
+  const parts: string[] = [];
+  let i = 0;
+  while (i < suffix.length) {
+    if (suffix[i] !== '.') return null;
+    const start = i;
+    i++;
+    while (i < suffix.length && /[A-Za-z0-9_$]/.test(suffix[i])) i++;
+    if (i >= suffix.length || suffix[i] !== '(') return null; // `.foo` without call
+    let depth = 0;
+    let quote = '';
+    for (; i < suffix.length; i++) {
+      const ch = suffix[i];
+      if (quote) {
+        if (ch === '\\') i++;
+        else if (ch === quote) quote = '';
+        continue;
+      }
+      if (QUOTES.includes(ch)) quote = ch;
+      else if (ch === '(') depth++;
+      else if (ch === ')') {
+        depth--;
+        if (depth === 0) {
+          i++;
+          break;
+        }
+      }
+    }
+    if (depth !== 0) return null;
+    parts.push(suffix.slice(start, i));
+    while (i < suffix.length && /\s/.test(suffix[i])) i++;
+  }
+  return parts;
+}
+
+/**
+ * Pull the loop length out of the chain: `.slow(2)` means the grid spans two
+ * cycles. Only an integer literal is taken — `.slow(x)` or `.slow(1.5)` stays
+ * opaque, since the grid could not write it back faithfully.
+ */
+function extractCycles(suffix: string): { cycles: number; suffix: string } {
+  if (suffix === '') return { cycles: 1, suffix };
+  const calls = chainCalls(suffix);
+  if (!calls) return { cycles: 1, suffix }; // not a plain chain: leave it alone
+  for (let i = 0; i < calls.length; i++) {
+    const match = /^\.slow\(\s*(\d+)\s*\)$/.exec(calls[i]);
+    if (!match) continue;
+    const cycles = Number(match[1]);
+    if (cycles < 1 || cycles > MAX_CYCLES) return { cycles: 1, suffix };
+    return { cycles, suffix: [...calls.slice(0, i), ...calls.slice(i + 1)].join('') };
+  }
+  return { cycles: 1, suffix };
+}
+
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /**
@@ -364,7 +441,9 @@ function readCall(pattern: string): CallParts {
 export function analyzeDrumGrid(pattern: string): DrumGridAnalysis {
   if (pattern.trim() === '') return { grid: null, reason: 'le pattern est vide' };
   try {
-    const { call, body, suffix } = readCall(pattern);
+    const { call, body, suffix: rawSuffix } = readCall(pattern);
+    // The loop length is the grid's business, not an opaque effect. [SPEC-18.32]
+    const { cycles, suffix } = extractCycles(rawSuffix);
     const parts = readParts(body);
 
     const flat: Flat = { onsets: [], denominators: [] };
@@ -393,7 +472,7 @@ export function analyzeDrumGrid(pattern: string): DrumGridAnalysis {
       cells[row][(onset.at.n * steps) / onset.at.d] = true;
     }
 
-    return { grid: { sounds, steps, cells, call, suffix }, reason: null };
+    return { grid: { sounds, steps, cycles, cells, call, suffix }, reason: null };
   } catch (error) {
     if (error instanceof Unsupported) return { grid: null, reason: error.message };
     throw error; // a real bug — never swallowed [SPEC-14.3]
@@ -430,7 +509,10 @@ export function parseDrumGrid(pattern: string): DrumGrid | null {
  */
 export function serializeDrumGrid(grid: DrumGrid): string {
   const body = grid.sounds.length === 0 ? restRow(grid.steps) : serializeRows(grid);
-  return `${grid.call}("${body}")${grid.suffix}`;
+  // The loop-length factor goes first, so re-reading finds it whatever the rest
+  // of the chain looks like. [SPEC-18.32]
+  const slow = grid.cycles > 1 ? `.slow(${grid.cycles})` : '';
+  return `${grid.call}("${body}")${slow}${grid.suffix}`;
 }
 
 function restRow(steps: number): string {
@@ -562,8 +644,45 @@ export function willLoseHits(grid: DrumGrid, steps: number): boolean {
 
 /** Steps per beat, or null when the grid does not divide into 4 beats evenly —
  *  a 6-step cycle has no beat lines to draw. [SPEC-18.10] */
-export function stepsPerBeat(steps: number): number | null {
-  return steps % BEATS_PER_CYCLE === 0 ? steps / BEATS_PER_CYCLE : null;
+/** Steps per beat, or null when the columns do not divide into whole beats.
+ *  The loop is `cycles × 4` beats long. [SPEC-18.32] */
+export function stepsPerBeat(steps: number, cycles = 1): number | null {
+  const beats = BEATS_PER_CYCLE * Math.max(1, cycles);
+  return steps % beats === 0 ? steps / beats : null;
+}
+
+/** Beats the grid covers. [SPEC-18.32] */
+export function gridBeats(grid: DrumGrid): number {
+  return BEATS_PER_CYCLE * Math.max(1, grid.cycles);
+}
+
+export const MAX_GRID_CYCLES = MAX_CYCLES;
+
+/**
+ * Stretch or shrink the grid to `cycles` cycles KEEPING each step's duration:
+ * going from 4 to 8 beats doubles the number of columns and leaves the new ones
+ * empty, instead of slowing the existing pattern down. That is what « my loop is
+ * 8 beats, let me write beats 5 to 8 » means. Returns the grid untouched when the
+ * result would exceed the displayable width. [SPEC-18.32]
+ */
+export function setCycles(grid: DrumGrid, cycles: number): DrumGrid {
+  const target = Math.max(1, Math.min(MAX_CYCLES, Math.round(cycles)));
+  if (target === grid.cycles) return grid;
+  const steps = Math.round((grid.steps * target) / grid.cycles);
+  if (steps < 1 || steps > MAX_STEPS) return grid;
+  const cells = grid.cells.map((row) => {
+    const next = new Array<boolean>(steps).fill(false);
+    for (let i = 0; i < Math.min(steps, row.length); i++) next[i] = row[i];
+    return next;
+  });
+  return { ...grid, cycles: target, steps, cells };
+}
+
+/** Would `setCycles` fit on screen? Lets the caller explain instead of ignoring. */
+export function cyclesFit(grid: DrumGrid, cycles: number): boolean {
+  const target = Math.max(1, Math.min(MAX_CYCLES, Math.round(cycles)));
+  const steps = Math.round((grid.steps * target) / grid.cycles);
+  return steps >= 1 && steps <= MAX_STEPS;
 }
 
 export const MAX_GRID_STEPS = MAX_STEPS;

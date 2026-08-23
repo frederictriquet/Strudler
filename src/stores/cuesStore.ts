@@ -18,7 +18,8 @@ import {
 } from '@core/cues/MidiCueOut';
 import { WsCueOut, type WsCueState } from '@core/cues/WsCueOut';
 import { clock, clockState, beatsPerBar } from '@stores/clockStore';
-import { channelsState, transportRunning, windowPhase } from '@stores/rackStore';
+import { armedSlots, channelsState, transportRunning, windowPhase } from '@stores/rackStore';
+import type { ArmedSlot } from '@core/channels/ChannelRack';
 import { notify } from '@stores/logStore';
 import { loadJson, saveJson } from '@core/persist/storage';
 import { fullReloadOnHmr } from '@core/persist/hmr';
@@ -121,7 +122,10 @@ let unsubscribers: Array<() => void> = [];
 let lastWholeBeat: number | null = null;
 let lastBpm: number | null = null;
 let lastRunning: boolean | null = null;
-let lastPlaying = new Map<string, string | null>();
+// Armed slots seen at the previous emission, keyed `set:channel:slot`, plus the
+// flag telling the first snapshot (baseline) from a real change. [SPEC-20.13]
+let lastArmed = new Map<string, ArmedSlot>();
+let slotsBaseline = false;
 
 /**
  * Whole-beat crossings, read off the master clock's rAF ticker.
@@ -184,31 +188,51 @@ function subscribeTransport(): () => void {
   });
 }
 
-/** Slot arming, derived from the rack snapshot — no extra call site to maintain. */
+/**
+ * Slot arming, derived from the ARMED slots of every pad set — no extra call site
+ * to maintain. Reading the current set's snapshot instead would turn a set switch
+ * into a burst of false "stopped/started" cues, since switching replaces the whole
+ * grid while changing nothing audible. [SPEC-20.4/20.13]
+ */
 function subscribeSlots(): () => void {
-  return channelsState.subscribe((channels) => {
-    const next = new Map<string, string | null>();
-    for (const ch of channels) {
-      ch.slots.forEach((slot, index) => {
-        const key = `${ch.id}:${index}`;
-        const value = slot.playing ? (slot.trackId ?? '') : null;
-        next.set(key, value);
-        const before = lastPlaying.get(key);
-        if (before === value) return;
-        // First pass records the baseline instead of replaying it as changes.
-        if (lastPlaying.size > 0) {
+  return armedSlots.subscribe((armed) => {
+    const next = new Map<string, ArmedSlot>();
+    for (const a of armed) next.set(`${a.set}:${a.channel}:${a.slot}`, a);
+    // The very first snapshot is the baseline, not a series of changes. Tracked by
+    // a flag and not by the map's size: at startup nothing is armed, so a size
+    // test would swallow the first arming of the session.
+    if (slotsBaseline) {
+      for (const [key, a] of next) {
+        if (!lastArmed.has(key)) {
           emit({
             type: 'slot',
-            channel: ch.id,
-            category: categoryOf(ch),
-            slot: index,
-            playing: slot.playing,
-            track: slot.trackId,
+            set: a.set,
+            setName: a.setName,
+            channel: a.channel,
+            category: a.category,
+            slot: a.slot,
+            playing: true,
+            track: a.trackId,
           });
         }
-      });
+      }
+      for (const [key, a] of lastArmed) {
+        if (!next.has(key)) {
+          emit({
+            type: 'slot',
+            set: a.set,
+            setName: a.setName,
+            channel: a.channel,
+            category: a.category,
+            slot: a.slot,
+            playing: false,
+            track: a.trackId,
+          });
+        }
+      }
     }
-    lastPlaying = next;
+    slotsBaseline = true;
+    lastArmed = next;
   });
 }
 

@@ -15,6 +15,60 @@ export function slotLabel(index: number, total: number): string {
   return String(index + 1);
 }
 
+/**
+ * How a channel launches a loop. Three states on one button. [SPEC-17.60]
+ *
+ * - `immediate`  the loop starts under the finger;
+ * - `quantized`  it is queued to the next window boundary [SPEC-8];
+ * - `fade`       it starts at once but **fades in over one window**, so a layer
+ *                can be brought in without anyone hearing it arrive.
+ *
+ * The third state is deliberately a state of the SAME button: on the APC those
+ * buttons are single-color LEDs whose three values are off / on / blink
+ * [SPEC-20.5], which maps exactly onto three modes.
+ */
+export type ChannelLaunch = 'immediate' | 'quantized' | 'fade';
+
+/** Cycling order of the button. */
+export const CHANNEL_LAUNCH_ORDER: ChannelLaunch[] = ['immediate', 'quantized', 'fade'];
+
+/** Glyph, short name and tooltip per mode — one source for the GUI and the
+ *  tooltips, so the surface and the words never drift apart. */
+export const LAUNCH_META: Record<ChannelLaunch, { glyph: string; name: string; title: string }> = {
+  immediate: {
+    glyph: '⚡',
+    name: 'Immédiat',
+    title: 'Immédiat — la loop démarre sous le doigt (clic pour quantiser)',
+  },
+  quantized: {
+    glyph: '⏱',
+    name: 'Quantisé',
+    title: 'Quantisé — la loop démarre à la prochaine fenêtre (clic pour le fondu)',
+  },
+  fade: {
+    glyph: '◗',
+    name: 'Fondu',
+    title:
+      'Fondu — la loop démarre tout de suite et monte progressivement sur la durée d’une fenêtre (clic pour revenir à immédiat)',
+  },
+};
+
+/** Next mode in the cycle. */
+export function stepChannelLaunch(current: ChannelLaunch): ChannelLaunch {
+  const i = CHANNEL_LAUNCH_ORDER.indexOf(current);
+  return CHANNEL_LAUNCH_ORDER[(i + 1) % CHANNEL_LAUNCH_ORDER.length];
+}
+
+/**
+ * Normalize a persisted launch mode. `legacyQuantized` is the pre-[SPEC-17.60]
+ * boolean: a saved rack must keep its quantization instead of silently reverting
+ * every channel to immediate.
+ */
+export function coerceChannelLaunch(raw: unknown, legacyQuantized?: unknown): ChannelLaunch {
+  if (raw === 'immediate' || raw === 'quantized' || raw === 'fade') return raw;
+  return legacyQuantized === true ? 'quantized' : 'immediate';
+}
+
 export interface SlotState {
   /** Track assigned to this button, or null if empty. [SPEC-5.4] */
   trackId: string | null;
@@ -166,9 +220,9 @@ export interface ChannelState {
   volume: number;
   /** Bipolar filter 0..1, neutral at 0.5. [SPEC-7.2] */
   filter: number;
-  /** Per-channel launch quantization: false = immediate, true = quantized on the
-   *  global window. Toggled per channel (APC bottom button). [SPEC-17.17] */
-  quantized: boolean;
+  /** How this channel launches a loop: immediate, quantized on the window, or
+   *  faded in over a window. Cycled by the channel's button. [SPEC-17.17/17.60] */
+  launch: ChannelLaunch;
   /** Per-channel effects (LPF / delay / reverb) driven by the nano. [SPEC-17.23] */
   effects: ChannelEffects;
   /** Which effect the knob/fader currently edit (last S/M/R pressed). [SPEC-17.23] */

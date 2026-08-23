@@ -21,6 +21,9 @@ export type IntentFunction =
   | 'channelFxKnob'
   | 'channelFxFader'
   | 'slotToggle'
+  | 'setPrev'
+  | 'setNext'
+  | 'ledModeToggle'
   | 'modeToggle'
   | 'channelModeToggle'
   | 'windowPrev'
@@ -29,7 +32,8 @@ export type IntentFunction =
   | 'nudgeBack'
   | 'nudgeForward'
   | 'transportStart'
-  | 'transportStop';
+  | 'transportStop'
+  | 'transportRecord';
 
 export interface MappingEntry {
   type: ControlType;
@@ -54,9 +58,30 @@ export interface LedSpec {
   type: MessageType;
   /** Palette color (note velocity) or CC value per slot visual state. */
   color: Record<SlotVisual, number>;
-  /** Optional note channel (0-15) per state — APC uses it for brightness/blink. */
+  /** Optional note channel (0-15) per state — APC uses it for brightness/blink.
+   *  This is the NIGHT profile (dim at rest). [SPEC-20.14] */
   statusChannel?: Partial<Record<SlotVisual, number>>;
+  /** Same, for the DAY profile: brighter at rest so a lit room does not swallow
+   *  the assigned pads. Absent = the controller has a single profile. [SPEC-20.14] */
+  dayChannel?: Partial<Record<SlotVisual, number>>;
+  /** True when the LEDs carry a real color palette, so the resting color of an
+   *  assigned pad can follow the current pad set. On a single-color LED the set
+   *  color is meaningless and the default is kept. [SPEC-20.6] */
+  rgb?: boolean;
 }
+
+/**
+ * LED values for the APC mini mk2's NON-GRID buttons (bottom track row 100-107,
+ * right scene column 112-119). Measured on the device: those are single-color
+ * LEDs. They accept only **0 = off, 1 = on, 2 = blink**, on note channel 0, and
+ * ignore both the color palette and the brightness/blink note channels — those
+ * are features of the 64 RGB pads alone. Sending a palette index there lights the
+ * button in its fixed color whatever the value, which is exactly what was
+ * observed. [SPEC-20.5, SPEC-17.15]
+ */
+export const BUTTON_LED_OFF = 0;
+export const BUTTON_LED_ON = 1;
+export const BUTTON_LED_BLINK = 2;
 
 export interface ControllerMapping {
   /** Substring matched (case-insensitive) against the MIDI port name. [SPEC-6.2] */
@@ -105,6 +130,9 @@ function buildNanoKontrol2(channels = 8): ControllerMapping {
   }
   entries.push(cc(41, 'transportStart')); // PLAY → (re)start clock
   entries.push(cc(42, 'transportStop')); // STOP → stop everything
+  // REC → journal de gestes [SPEC-11]. Le bouton s'allume en enregistrement
+  // [SPEC-17.59] ; une lampe allumée sur un bouton inerte serait un piège.
+  entries.push(cc(45, 'transportRecord'));
   entries.push(cc(46, 'modeToggle')); // CYCLE  [SPEC-7.5]
   entries.push(cc(58, 'windowPrev')); // TRACK ◄ [SPEC-7.6]
   entries.push(cc(59, 'windowNext')); // TRACK ►
@@ -134,9 +162,13 @@ function buildNanoKontrol2(channels = 8): ControllerMapping {
  *   slot 0. channel = col. Gives up to 8 slots per channel (Q3).
  * - Bottom track buttons (notes 100-107) → per-channel quantize toggle (the "9th
  *   button" under each column). [SPEC-17.17]
- * - Scene-launch column (notes 112-115) → global mode / window / resync.
+ * - Scene-launch column: notes 112/113 (CLIP STOP, SOLO) → pad sets. [SPEC-20.3]
+ * - SHIFT (note 122) → pad brightness, night ⇄ day. [SPEC-20.14]
  */
 const APC_TRACK_BUTTON_BASE = 100; // bottom row of 8 buttons: notes 100..107
+/** SHIFT. ⚠ To be confirmed on the device — the MIDI monitor [SPEC-17.35] names
+ *  the code of any unmapped press, so a different value is a one-line change. */
+const APC_SHIFT_NOTE = 122;
 
 function buildApcMiniMk2(channels = 8): ControllerMapping {
   const entries: MappingEntry[] = [];
@@ -157,10 +189,15 @@ function buildApcMiniMk2(channels = 8): ControllerMapping {
     const slot = 7 - row; // invert: top physical row = slot 0, matching the GUI order
     entries.push({ type: 'button', messageType: 'note', code: note, intent: 'slotToggle', channel: col, slot });
   }
-  entries.push({ type: 'button', messageType: 'note', code: 112, intent: 'modeToggle' });
-  entries.push({ type: 'button', messageType: 'note', code: 113, intent: 'windowPrev' });
-  entries.push({ type: 'button', messageType: 'note', code: 114, intent: 'windowNext' });
-  entries.push({ type: 'button', messageType: 'note', code: 115, intent: 'resync' });
+  // Right column, two first buttons: switch pad set. [SPEC-20.3] The functions
+  // that used to sit here (global quantize, window −/+, resync) LEFT the APC on
+  // purpose — they remain on the nanoKONTROL2 (CYCLE, TRACK ◄ ►, MARKER SET) and
+  // in the GUI, where they already were. Notes 114-119 are therefore free.
+  entries.push({ type: 'button', messageType: 'note', code: 112, intent: 'setPrev' }); // CLIP STOP
+  entries.push({ type: 'button', messageType: 'note', code: 113, intent: 'setNext' }); // SOLO
+  // SHIFT → pad brightness night ⇄ day: a dim resting pad is unreadable in
+  // daylight, and a bright one is blinding in a dark room. [SPEC-20.14]
+  entries.push({ type: 'button', messageType: 'note', code: APC_SHIFT_NOTE, intent: 'ledModeToggle' });
   return {
     match: 'apc mini mk2',
     name: 'Akai APC mini mk2',
@@ -181,6 +218,12 @@ function buildApcMiniMk2(channels = 8): ControllerMapping {
       // (channel 0 = 10%, unobtrusive); playing is full brightness (channel 6 =
       // 100%); queued toggles blink (channel 10).
       statusChannel: { playing: 6, pendingStart: 10, pendingStop: 10 },
+      // Daylight profile [SPEC-20.14]: the resting pad climbs from 10% to 75%, so
+      // an assigned-but-idle loop stays readable on a lit stage. Playing keeps
+      // 100% and the queued toggles keep blinking, so the gradient — and the
+      // meaning of each state — survives the switch.
+      dayChannel: { assigned: 4, playing: 6, pendingStart: 10, pendingStop: 10 },
+      rgb: true, // an assigned pad rests in the current set's color [SPEC-20.6]
     },
   };
 }
@@ -242,7 +285,14 @@ export function resolveIntent(
     case 'channelFxToggle':
       return pressed ? { type: 'channelFxToggle', channel: entry.channel ?? 0 } : null;
     case 'slotToggle':
+      // No `set`: a pad always means the set it currently addresses. [SPEC-20.4]
       return pressed ? { type: 'slotToggle', channel: entry.channel ?? 0, slot: entry.slot ?? 0 } : null;
+    case 'setPrev':
+      return pressed ? { type: 'setPrev' } : null;
+    case 'setNext':
+      return pressed ? { type: 'setNext' } : null;
+    case 'ledModeToggle':
+      return pressed ? { type: 'ledModeToggle' } : null;
     case 'modeToggle':
       return pressed ? { type: 'modeToggle' } : null;
     case 'channelModeToggle':
@@ -261,6 +311,8 @@ export function resolveIntent(
       return pressed ? { type: 'transportStart' } : null;
     case 'transportStop':
       return pressed ? { type: 'transportStop' } : null;
+    case 'transportRecord':
+      return pressed ? { type: 'sessionRecordToggle' } : null;
     default:
       return null;
   }
@@ -292,6 +344,52 @@ export function slotButtonTargets(
     }
   }
   return targets;
+}
+
+/**
+ * Pad brightness profile [SPEC-20.14]. `night` keeps a resting pad at 10% — right
+ * in a dark room, unreadable in daylight; `day` lifts it to 75%. Toggled by the
+ * APC's SHIFT button, and persisted.
+ */
+export type LedMode = 'night' | 'day';
+
+export const LED_MODES: LedMode[] = ['night', 'day'];
+
+export function coerceLedMode(raw: unknown): LedMode {
+  return raw === 'day' ? 'day' : 'night';
+}
+
+/** Note channel (brightness/blink) for a slot state under the given profile. */
+export function slotLedChannel(
+  mapping: ControllerMapping,
+  visual: SlotVisual,
+  mode: LedMode,
+): number {
+  const table = mode === 'day' ? (mapping.led.dayChannel ?? mapping.led.statusChannel) : mapping.led.statusChannel;
+  return table?.[visual] ?? 0;
+}
+
+/** Buttons that switch pad set on this controller, for their own LED. [SPEC-20.5] */
+export function setButtonTargets(
+  mapping: ControllerMapping,
+): Array<{ code: number; intent: 'setPrev' | 'setNext' }> {
+  return mapping.entries
+    .filter((e) => e.intent === 'setPrev' || e.intent === 'setNext')
+    .map((e) => ({ code: e.code, intent: e.intent as 'setPrev' | 'setNext' }));
+}
+
+/**
+ * LED value for a slot's visual state. An `assigned` pad rests in the CURRENT
+ * SET's color when the controller has a real palette [SPEC-20.6]; every other
+ * state keeps its own code, so a set can never disguise itself as a state.
+ */
+export function slotLedValue(
+  mapping: ControllerMapping,
+  visual: SlotVisual,
+  restColor?: number,
+): number {
+  if (visual === 'assigned' && mapping.led.rgb && restColor !== undefined) return restColor;
+  return mapping.led.color[visual];
 }
 
 /** MIDI status byte for a LED message of the given type, on the given channel

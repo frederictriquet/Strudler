@@ -2,7 +2,7 @@
 // the GUI and MIDI ([PLAN B] unified input surface). Also wires MIDI input →
 // intent and rack state → LED output ([SPEC-6.2/6.4]).
 
-import { writable, get } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 import {
   engine,
   DJF_NEUTRAL,
@@ -11,15 +11,33 @@ import {
   DJF_RISER_TOP,
 } from '@core/engine/StrudelEngine';
 import { clock, setBpm } from '@stores/clockStore';
-import { createDefaultRack, DEFAULT_CHANNEL_COUNT } from '@core/channels/ChannelRack';
+import {
+  createDefaultRack,
+  DEFAULT_CHANNEL_COUNT,
+  type ArmedSlot,
+  type FadeRequest,
+} from '@core/channels/ChannelRack';
 import { library } from '@core/library/Library';
 import {
+  coerceChannelLaunch,
   coerceEffects,
   coerceFxFocus,
   isMissingTrack,
+  stepChannelLaunch,
   FX_KINDS,
+  type ChannelLaunch,
   type ChannelState,
 } from '@core/channels/types';
+import {
+  MAX_SETS,
+  PAD_SETS_VERSION,
+  readStoredSets,
+  setColorApc,
+  setColorHex,
+  type PadSet,
+  type SetColor,
+  type SetSummary,
+} from '@core/channels/sets';
 import type { Intent } from '@core/intent/intents';
 import { Launcher, type LauncherState, type LaunchMode } from '@core/launch/Launcher';
 import {
@@ -34,17 +52,33 @@ import { DEFAULT_CAMELOT } from '@core/music/camelot';
 import {
   controllerMappings,
   ledStatus,
+  type ControllerMapping,
   lookupEntry,
   mappingForDevice,
   resolveIntent,
+  setButtonTargets,
   slotButtonTargets,
+  slotLedChannel,
+  slotLedValue,
   slotVisual,
+  coerceLedMode,
+  type LedMode,
+  BUTTON_LED_BLINK,
+  BUTTON_LED_OFF,
+  BUTTON_LED_ON,
 } from '@core/mapping/mapping';
 import { recordMidiEvent } from '@stores/midiMonitorStore';
 import { loadJson, saveJson } from '@core/persist/storage';
 import { fullReloadOnHmr } from '@core/persist/hmr';
 import { loadDefaultSamples } from '@stores/samplesStore';
 import { notify } from '@stores/logStore';
+import {
+  holdWakeLock,
+  isWakeLockSupported,
+  onWakeLockChange,
+  releaseWakeLock,
+  setWakeLockReporter,
+} from '@core/system/wakeLock';
 import {
   recordPhysicalIntent,
   isContinuousIntent,
@@ -61,6 +95,45 @@ const rack = createDefaultRack();
 const launcher = new Launcher(clock, rack);
 
 export const channelsState = writable<ChannelState[]>(rack.snapshot());
+
+// --- Pad sets [SPEC-20] : état observable ---
+
+/** A set that is NOT the one the pads address, but still has loops running.
+ *  Nothing on the grid explains that sound, hence the badge. [SPEC-20.5] */
+export interface ForeignSet {
+  id: string;
+  index: number;
+  name: string;
+  color: SetColor;
+  hex: string;
+  count: number;
+}
+
+/** Every pad set, in display order, already summarized for the GUI. [SPEC-20.10] */
+export const padSets = writable<SetSummary[]>(rack.setSummaries());
+export const activeSetIndex = writable<number>(rack.activeSetIndex);
+/** Hex of the current set's color — the resting tint of assigned slots. [SPEC-20.6] */
+export const activeSetColor = writable<string>(
+  setColorHex(rack.setSummaries()[rack.activeSetIndex].color),
+);
+export const foreignPlaying = writable<ForeignSet[]>([]);
+
+/** Armed slots of EVERY set — the stage output derives its slot cues from this,
+ *  so a set switch is not mistaken for loops starting and stopping. [SPEC-20.13] */
+export const armedSlots = writable<ArmedSlot[]>([]);
+
+function publishSets(sets: SetSummary[]): void {
+  padSets.set(sets);
+  const active = sets.find((s) => s.active) ?? sets[0];
+  activeSetIndex.set(active?.index ?? 0);
+  if (active) activeSetColor.set(active.hex);
+  foreignPlaying.set(
+    sets
+      .filter((s) => !s.active && s.playing > 0)
+      .map((s) => ({ id: s.id, index: s.index, name: s.name, color: s.color, hex: s.hex, count: s.playing })),
+  );
+}
+
 export const launcherState = writable<LauncherState>(launcher.state);
 export const audioEnabled = writable<boolean>(false);
 export const rackError = writable<string | null>(null);
@@ -70,6 +143,7 @@ export const slotsPerChannel = writable<number>(rack.slotsPerChannel);
 rack.onError((message) => rackError.set(message)); // surface audio errors [SPEC-14.3]
 
 let lastChannels: ChannelState[] = rack.snapshot();
+let lastSets: SetSummary[] = rack.setSummaries();
 
 // --- Persistence [SPEC-13.2] : restore associations/settings, save on change ---
 
@@ -81,6 +155,8 @@ interface Settings {
   showSlotProgress: boolean;
   musicalKey: string | null;
   forceKey?: boolean;
+  /** Pad brightness profile. [SPEC-20.14] */
+  ledMode?: LedMode;
   /** Stored scenes, null when empty. A bare `string[]` is the legacy pre-[SPEC-17.52]
    *  shape (armed slots only) and is migrated on load. [SPEC-17.36] */
   scenes?: (Scene | string[] | null)[];
@@ -90,34 +166,65 @@ interface Settings {
  *  toggled from the MIDI/Session modal. [SPEC-17.10] */
 export const showSlotProgress = writable<boolean>(true);
 
+/** Pad brightness profile: 'night' (resting pad at 10 %) or 'day' (75 %), toggled
+ *  by the APC's SHIFT button. Persisted — a venue's light does not change between
+ *  two reloads. [SPEC-20.14] */
+export const ledMode = writable<LedMode>('night');
+
 /** Scene slots on the Stream Deck's first row (M+ then 4 slots). [SPEC-17.36] */
 export const SCENE_COUNT = 4;
 
-/** A memorized scene. [SPEC-17.36, SPEC-17.52] */
+/** A memorized scene. [SPEC-17.36, SPEC-17.52, SPEC-20.11] */
 export interface Scene {
-  /** Armed slots, as `channel:slot` keys. */
+  /** Armed slots ACROSS EVERY SET, as `set:channel:slot` keys. A scene limited to
+   *  the current set would recall part of what is sounding. [SPEC-20.11] */
   armed: string[];
-  /** Per-channel quantization at capture time; empty = legacy scene, left as is. */
-  quantized: boolean[];
+  /** Per-channel launch mode at capture time; empty = legacy scene, left as is.
+   *  A pre-[SPEC-17.60] scene stored booleans and is migrated on load. */
+  launch: ChannelLaunch[];
+  /** Id of the set that was current; absent = pre-sets scene. [SPEC-20.11] */
+  set?: string;
 }
 
 /** Stored scenes, `null` = empty slot. Persisted. */
 export const scenes = writable<(Scene | null)[]>(Array(SCENE_COUNT).fill(null));
 
+/** Id of the first set — where pre-sets armed keys and scenes belong. [SPEC-20.11] */
+function firstSetId(): string {
+  return rack.setSummaries()[0]?.id ?? 'set-1';
+}
+
+/** A pre-sets armed key is `channel:slot`; prefix it with the first set so an old
+ *  scene keeps meaning something instead of being silently emptied. [SPEC-20.11] */
+function migrateArmed(keys: string[]): string[] {
+  const first = firstSetId();
+  return keys.map((k) => (k.split(':').length === 2 ? `${first}:${k}` : k));
+}
+
 /** Normalize a persisted entry, migrating the legacy armed-only array. [SPEC-17.52] */
 function coerceScene(raw: unknown): Scene | null {
   if (Array.isArray(raw)) {
     // Legacy shape: armed keys only, no quantization captured.
-    return raw.every((k) => typeof k === 'string') ? { armed: raw as string[], quantized: [] } : null;
+    return raw.every((k) => typeof k === 'string')
+      ? { armed: migrateArmed(raw as string[]), launch: [], set: firstSetId() }
+      : null;
   }
   if (!raw || typeof raw !== 'object') return null;
   const s = raw as Partial<Scene>;
   if (!Array.isArray(s.armed) || !s.armed.every((k) => typeof k === 'string')) return null;
-  const quantized =
-    Array.isArray(s.quantized) && s.quantized.every((q) => typeof q === 'boolean')
-      ? (s.quantized as boolean[])
+  // A scene saved before [SPEC-17.60] holds booleans; map them onto the modes
+  // rather than dropping the capture.
+  const raw2 = s as { launch?: unknown; quantized?: unknown };
+  const launch: ChannelLaunch[] = Array.isArray(raw2.launch)
+    ? raw2.launch.map((m) => coerceChannelLaunch(m))
+    : Array.isArray(raw2.quantized)
+      ? raw2.quantized.map((q) => coerceChannelLaunch(undefined, q))
       : [];
-  return { armed: s.armed as string[], quantized };
+  return {
+    armed: migrateArmed(s.armed as string[]),
+    launch,
+    set: typeof s.set === 'string' ? s.set : firstSetId(),
+  };
 }
 /** True while the next scene press stores instead of recalling. */
 export const sceneStoreMode = writable<boolean>(false);
@@ -145,18 +252,20 @@ forceKey.subscribe(applyKeyToEngine);
 
 // Restore persisted associations/volume/filter (playing forced off) before
 // wiring reactivity, so the app reopens in its previous state. [SPEC-13.2]
-const savedRack = loadJson<ChannelState[] | null>('rack', null);
-if (Array.isArray(savedRack)) {
-  // Bindings are NEVER dropped, only re-resolved. [SPEC-17.51] Purging ids the
-  // library cannot resolve is destructive: the purged rack is persisted 400 ms
-  // later, so one unreadable library (renamed file, broken glob) permanently
-  // erases the session. Unresolved ids are kept, reported, and the slot is shown
-  // as missing until its file comes back.
-  const missing = new Set<string>();
-  const coerced = savedRack.map((ch) => ({
+// Bindings are NEVER dropped, only re-resolved. [SPEC-17.51] Purging ids the
+// library cannot resolve is destructive: the purged rack is persisted 400 ms
+// later, so one unreadable library (renamed file, broken glob) permanently
+// erases the session. Unresolved ids are kept, reported, and the slot is shown
+// as missing until its file comes back.
+function coerceChannels(raw: unknown[], missing: Set<string>): ChannelState[] {
+  return (raw as ChannelState[]).map((ch) => ({
     ...ch,
     categories: [...ch.categories], // kept even if unknown: the folder may return
-    quantized: typeof ch.quantized === 'boolean' ? ch.quantized : false, // [SPEC-17.17]
+    // Pre-[SPEC-17.60] state carried a boolean `quantized`.
+    launch: coerceChannelLaunch(
+      ch.launch,
+      (ch as unknown as { quantized?: unknown }).quantized,
+    ),
     effects: coerceEffects(ch.effects), // fills in effects added since [SPEC-17.23/17.28]
     fxFocus: coerceFxFocus(ch.fxFocus),
     slots: ch.slots.map((s) => {
@@ -172,7 +281,20 @@ if (Array.isArray(savedRack)) {
       };
     }),
   }));
-  void rack.restore(coerced);
+}
+
+// The `rack` key holds every pad set since version 2; a bare array is the
+// pre-sets shape and becomes a single set. [SPEC-20.12]
+const savedRack = readStoredSets(loadJson<unknown>('rack', null));
+if (savedRack) {
+  const missing = new Set<string>();
+  const restored: PadSet[] = savedRack.sets.map((s) => ({
+    id: s.id,
+    name: s.name,
+    color: s.color,
+    channels: coerceChannels(s.channels, missing),
+  }));
+  void rack.restoreSets(restored, savedRack.activeSet);
   if (missing.size > 0) {
     // Loud: the pads look wrong and the user must know why. [SPEC-14.3]
     notify(
@@ -187,8 +309,8 @@ if (savedSettings) {
   launcher.setWindow(savedSettings.window);
   // Migrate a legacy global mode to per-channel, unless the restored rack already
   // carries per-channel quantization. [SPEC-17.17]
-  if (savedSettings.mode === 'quantized' && !Array.isArray(savedRack)) {
-    rack.setAllQuantized(true);
+  if (savedSettings.mode === 'quantized' && !savedRack) {
+    rack.setAllLaunch('quantized');
   }
   if (typeof savedSettings.showSlotProgress === 'boolean') {
     showSlotProgress.set(savedSettings.showSlotProgress);
@@ -199,6 +321,7 @@ if (savedSettings) {
   if (typeof savedSettings.forceKey === 'boolean') {
     forceKey.set(savedSettings.forceKey);
   }
+  if (savedSettings.ledMode !== undefined) ledMode.set(coerceLedMode(savedSettings.ledMode));
   if (Array.isArray(savedSettings.scenes)) {
     // Keep exactly SCENE_COUNT entries, migrating legacy shapes. [SPEC-17.36/17.52]
     scenes.set(
@@ -213,13 +336,19 @@ rack.setSlotsPerChannel(8);
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 function persistNow(): void {
   try {
-    saveJson('rack', lastChannels);
+    // Every set, and which one the pads address. [SPEC-20.12]
+    saveJson('rack', {
+      version: PAD_SETS_VERSION,
+      activeSet: rack.activeSetIndex,
+      sets: rack.setsSnapshot(),
+    });
     saveJson('settings', {
       bpm: clock.currentBpm,
       window: launcher.state.window,
       showSlotProgress: get(showSlotProgress),
       musicalKey: get(musicalKey),
       forceKey: get(forceKey),
+      ledMode: get(ledMode),
       scenes: get(scenes),
     });
     persistError.set(null);
@@ -247,11 +376,30 @@ launcher.subscribe((state) => {
 // note channel per state (blink). [SPEC-6.4]
 const ledCache = new Map<string, string>();
 
-// Lit value for a per-channel quantize button (APC track buttons are single-color;
-// any non-zero velocity lights them). [SPEC-17.17]
+// Transport & recording state as PLAIN variables: syncLeds runs on the rack's
+// very first emit, long before `transportRunning` and `sessionStatus` are
+// declared further down this module — a get() on them would throw at startup.
+// The subscriptions that keep these up to date sit after those declarations.
+let ledRunning = false;
+let ledRecording = false;
+
+// Lit value for a single-color button. The nano's LEDs are CC-driven and take 127;
+// the APC's non-grid buttons (track row, scene column) are Note-driven and accept
+// only 0/1/2. [SPEC-17.17, SPEC-20.5]
 const MODE_LED_ON = 127;
 
-function syncLeds(channels: ChannelState[]): void {
+function buttonLedOn(mapping: ControllerMapping): number {
+  return mapping.led.type === 'note' ? BUTTON_LED_ON : MODE_LED_ON;
+}
+
+function syncLeds(channels: ChannelState[], sets: SetSummary[]): void {
+  // Resting color of an assigned pad = the current set's color [SPEC-20.6]; sets
+  // that still have loops running while the pads address another one make the
+  // switch buttons blink [SPEC-20.5].
+  const activeSet = sets.find((s) => s.active) ?? sets[0];
+  const mode = get(ledMode); // pad brightness profile [SPEC-20.14]
+  const restColor = activeSet ? setColorApc(activeSet.color) : undefined;
+  const foreign = sets.filter((s) => !s.active && s.playing > 0);
   // Push slot-button state to every known controller; midi.send is a no-op if
   // that device has no connected output. Both controllers light at once. [SPEC-6.1]
   for (const mapping of controllerMappings) {
@@ -269,8 +417,8 @@ function syncLeds(channels: ChannelState[]): void {
         playing: s?.playing ?? false,
         pending: s?.pending ?? false,
       });
-      const value = mapping.led.color[visual];
-      const status = ledStatus(mapping.led.type, mapping.led.statusChannel?.[visual] ?? 0);
+      const value = slotLedValue(mapping, visual, restColor);
+      const status = ledStatus(mapping.led.type, slotLedChannel(mapping, visual, mode));
       const key = `${mapping.match}:${code}`;
       const sig = `${status}:${value}`;
       if (ledCache.get(key) === sig) continue;
@@ -278,12 +426,66 @@ function syncLeds(channels: ChannelState[]): void {
       if (midi.send(mapping.match, [status, code, value])) ledCache.set(key, sig);
     }
 
+    // Set-switch buttons (APC CLIP STOP / SOLO). These are single-color LEDs with
+    // three states only — off / on / blink [SPEC-20.5] — so they cannot carry the
+    // destination's color; that color lives on screen, on the neighbouring set
+    // vignettes. What they CAN say, they say:
+    //   off   = nothing that way (end of the list, the press does nothing)
+    //   on    = there is a set to reach
+    //   blink = loops are still running in another set
+    for (const { code, intent } of setButtonTargets(mapping)) {
+      const from = activeSet?.index ?? 0;
+      const target = sets[intent === 'setPrev' ? from - 1 : from + 1];
+      const value = !target
+        ? BUTTON_LED_OFF
+        : foreign.length > 0
+          ? BUTTON_LED_BLINK
+          : BUTTON_LED_ON;
+      // Channel 0: the brightness/blink channels are a grid-pad feature and are
+      // ignored here.
+      const status = ledStatus(mapping.led.type);
+      const key = `${mapping.match}:set:${code}`;
+      const sig = `${status}:${value}`;
+      if (ledCache.get(key) === sig) continue;
+      if (midi.send(mapping.match, [status, code, value])) ledCache.set(key, sig);
+    }
+
+    // Transport lamps (nano PLAY / STOP / REC): the surface says which mode it is
+    // in, instead of leaving that to the screen alone. [SPEC-17.59]
+    for (const entry of mapping.entries) {
+      const lit =
+        entry.intent === 'transportStart'
+          ? ledRunning
+          : entry.intent === 'transportStop'
+            ? !ledRunning
+            : entry.intent === 'transportRecord'
+              ? ledRecording
+              : null;
+      if (lit === null) continue;
+      const status = ledStatus(mapping.led.type);
+      const value = lit ? buttonLedOn(mapping) : BUTTON_LED_OFF;
+      const key = `${mapping.match}:transport:${entry.code}`;
+      const sig = `${status}:${value}`;
+      if (ledCache.get(key) === sig) continue;
+      if (midi.send(mapping.match, [status, entry.code, value])) ledCache.set(key, sig);
+    }
+
     // Per-channel quantize buttons (APC bottom row): lit when quantized. [SPEC-17.17]
     for (const entry of mapping.entries) {
       if (entry.intent !== 'channelModeToggle' || entry.channel === undefined) continue;
-      const quantized = channels[entry.channel]?.quantized ?? false;
+      const mode = channels[entry.channel]?.launch ?? 'immediate';
       const status = ledStatus(mapping.led.type);
-      const value = quantized ? MODE_LED_ON : 0;
+      // Three modes onto the three values a single-color button has [SPEC-20.5]:
+      // off = immediate, on = quantized, BLINK = fade-in. That mapping is why the
+      // third state is a state of this button. [SPEC-17.60]
+      const value =
+        mode === 'immediate'
+          ? BUTTON_LED_OFF
+          : mode === 'quantized'
+            ? buttonLedOn(mapping)
+            : mapping.led.type === 'note'
+              ? BUTTON_LED_BLINK
+              : buttonLedOn(mapping); // CC LEDs cannot blink: lit is the best they do
       const key = `${mapping.match}:mode:${entry.code}`;
       const sig = `${status}:${value}`;
       if (ledCache.get(key) === sig) continue;
@@ -301,7 +503,7 @@ function syncLeds(channels: ChannelState[]): void {
         ? (ch?.effects?.[ch.fxFocus]?.on ?? false)
         : FX_KINDS.some((k) => ch?.effects?.[k]?.on);
       const status = ledStatus(mapping.led.type);
-      const value = lit ? MODE_LED_ON : 0;
+      const value = lit ? buttonLedOn(mapping) : BUTTON_LED_OFF;
       const key = `${mapping.match}:fx:${entry.code}`;
       const sig = `${status}:${value}`;
       if (ledCache.get(key) === sig) continue;
@@ -311,17 +513,40 @@ function syncLeds(channels: ChannelState[]): void {
 }
 
 // Mirror rack → store (+ LED + persist) on every change. [SPEC-6.4, SPEC-10.5, SPEC-13.2]
-rack.subscribe((channels) => {
+rack.subscribe((channels, sets) => {
   lastChannels = channels;
+  lastSets = sets;
   channelsState.set(channels);
   slotsPerChannel.set(channels[0]?.slots.length ?? rack.slotsPerChannel);
-  syncLeds(channels);
+  publishSets(sets); // [SPEC-20.5/20.10]
+  armedSlots.set(rack.armedDetail()); // stage output, every set [SPEC-20.13]
+  syncLeds(channels, sets);
   schedulePersist();
 });
 
 /** Change how many slots each channel has (1..8). Persisted. [SPEC-5.5, Q3] */
 export function setSlotsPerChannel(n: number): void {
   rack.setSlotsPerChannel(n);
+}
+
+/**
+ * Switch the pad brightness profile (APC SHIFT, or the GUI button). A resting pad
+ * at 10 % is right in a dark room and unreadable on a lit stage — the venue
+ * decides, not the code. Persisted. [SPEC-20.14]
+ */
+export function toggleLedMode(): void {
+  const next: LedMode = get(ledMode) === 'night' ? 'day' : 'night';
+  setLedMode(next);
+}
+
+export function setLedMode(value: LedMode): void {
+  if (get(ledMode) === value) return;
+  ledMode.set(value);
+  // Only the note channel changes, so the cached signature differs and every pad
+  // is re-sent by the normal diff — no need to clear the cache. [SPEC-6.4]
+  syncLeds(lastChannels, lastSets);
+  schedulePersist();
+  notify('info', value === 'day' ? 'Pads : luminosité jour' : 'Pads : luminosité nuit');
 }
 
 /** Toggle the animated per-slot progress gauge. Persisted. [SPEC-17.10] */
@@ -346,11 +571,82 @@ export function setForceKey(on: boolean): void {
 // [SPEC-6.4, SPEC-14.5]
 midi.onPortsChanged(() => {
   ledCache.clear();
-  syncLeds(lastChannels);
+  syncLeds(lastChannels, lastSets);
   // A reconnected controller may have been moved meanwhile: drop ownership so
   // soft takeover re-arms instead of trusting a stale position. [SPEC-17.30]
   resetTakeover();
 });
+
+// --- Fade-in of a launched loop [SPEC-17.60] ---
+//
+// A channel in `fade` mode brings its loop in over ONE quantization window: the
+// voice starts at once with its own gain at 0, and that gain is ramped to 1 over
+// W beats. Driven frame by frame from here rather than by a Web Audio automation,
+// for the same reason as the filter glide [SPEC-17.43]: every sound event rewrites
+// its gain from the ref, so an automation would be overwritten at the next note.
+//
+// The ramp lives in the store because it needs the window (launcher) and the tempo
+// (clock); the rack only says WHICH voice is fading.
+
+/** Voices currently ramping, keyed `set:channel:slot` → animation frame. */
+const fadeFrames = new Map<string, number>();
+/** Level each ramp is at, so a cancellation resumes from what is being heard. */
+const fadeLevels = new Map<string, number>();
+
+/**
+ * Ramp one voice's gain to `target` (1 = in, 0 = out) over a window.
+ *
+ * The duration is **proportional to the distance left**, so cancelling a fade-out
+ * that had only just begun does not take a full window to climb back — the gesture
+ * feels like an undo, not like a new fade. [SPEC-17.60.2]
+ */
+function rampVoice(request: FadeRequest): void {
+  const key = `${request.set}:${request.channel}:${request.slot}`;
+  const previous = fadeFrames.get(key);
+  if (previous !== undefined) cancelAnimationFrame(previous);
+
+  const target = request.kind === 'in' ? 1 : 0;
+  const from = fadeLevels.get(key) ?? (request.kind === 'in' ? 0 : 1);
+  const distance = Math.abs(target - from);
+  if (distance === 0) {
+    finish(request, key, target);
+    return;
+  }
+
+  // One window at the current tempo, scaled by the distance left. A tempo change
+  // mid-fade stretches nothing: the duration is decided when the fade starts,
+  // which is what was heard.
+  const windowMs = Math.max(1, (launcher.state.window * 60_000) / clock.currentBpm);
+  const durationMs = windowMs * distance;
+  const startedAt = performance.now();
+
+  const step = () => {
+    const t = Math.min(1, (performance.now() - startedAt) / durationMs);
+    const value = from + (target - from) * t;
+    fadeLevels.set(key, value);
+    engine.setVoiceFade(request.set, request.channel, request.slot, value);
+    if (t < 1) {
+      fadeFrames.set(key, requestAnimationFrame(step));
+      return;
+    }
+    finish(request, key, target);
+  };
+  step();
+}
+
+function finish(request: FadeRequest, key: string, target: number): void {
+  fadeFrames.delete(key);
+  fadeLevels.delete(key);
+  if (target === 0) {
+    // The rack owns the state and the voice: it decides the loop is really over.
+    void rack.finishFadeOut(request);
+  } else {
+    // Back to plain full gain, nothing left to read.
+    engine.clearVoiceFade(request.set, request.channel, request.slot);
+  }
+}
+
+rack.onFade(rampVoice);
 
 // --- Phase nudge [SPEC-17.34] ---
 //
@@ -522,7 +818,12 @@ export function pressScene(index: number): void {
 function storeScene(index: number): void {
   scenes.update((list) => {
     const next = [...list];
-    next[index] = { armed: rack.armedSnapshot(), quantized: rack.quantizedSnapshot() };
+    // Armed slots of EVERY set + which set the pads addressed. [SPEC-20.11]
+    next[index] = {
+      armed: rack.armedSnapshot(),
+      launch: rack.launchSnapshot(),
+      set: rack.activeSetId,
+    };
     return next;
   });
   activeScene.set(index);
@@ -538,16 +839,22 @@ function recallScene(index: number): void {
   }
   recalling = true;
   try {
-    // Quantization FIRST: the slot toggles that follow must be launched the way
-    // the scene was memorized. Only channels that differ are toggled, so LEDs and
-    // persistence see a single change each. [SPEC-17.52]
-    scene.quantized.forEach((wanted, channel) => {
-      if (rack.isChannelQuantized(channel) !== wanted) {
-        dispatch({ type: 'channelModeToggle', channel });
-      }
-    });
-    for (const { channel, slot } of rack.diffToScene(scene.armed)) {
-      dispatch({ type: 'slotToggle', channel, slot });
+    // The captured set becomes current FIRST: the pads must come back where they
+    // were, and the quantization below belongs to that set. [SPEC-20.11]
+    if (scene.set) {
+      const index = rack.setIndexOf(scene.set);
+      if (index >= 0) dispatch({ type: 'setSelect', index });
+    }
+    // Launch modes THEN: the slot toggles that follow must be launched the way
+    // the scene was memorized. Only channels that differ are touched, so LEDs and
+    // persistence see a single change each. [SPEC-17.52/17.60]
+    for (const { channel, mode } of rack.launchDiff(scene.launch)) {
+      rack.setChannelLaunch(channel, mode);
+    }
+    // Across every set: half a scene would be worse than none in a live set.
+    // [SPEC-20.11]
+    for (const { set, channel, slot } of rack.diffToScene(scene.armed)) {
+      dispatch({ type: 'slotToggle', channel, slot, set });
     }
   } finally {
     recalling = false;
@@ -592,25 +899,46 @@ export function dispatch(intent: Intent): void {
     case 'channelFxFader':
       rack.setChannelFxParam(intent.channel, 'p2', intent.value);
       break;
-    case 'slotToggle':
+    case 'slotToggle': {
       // A hand-made change means we are no longer on the recalled scene. [SPEC-17.36]
       if (!recalling) activeScene.set(null);
+      // No `set` = the set the pads address; an explicit one comes from a scene
+      // recall or a replayed journal. [SPEC-20.11]
+      const setId = intent.set ?? rack.activeSetId;
       if (get(transportRunning)) {
         // Playing: honor the launch mode (immediate or quantized). [SPEC-7.4, SPEC-8]
-        launcher.requestSlotToggle(intent.channel, intent.slot);
+        launcher.requestSlotToggle(intent.channel, intent.slot, setId);
       } else {
         // Stopped: arming is always immediate (the clock isn't running to quantize to).
-        rack.toggleSlot(intent.channel, intent.slot).catch((err: unknown) =>
+        rack.toggleSlot(intent.channel, intent.slot, setId).catch((err: unknown) =>
           rackError.set((err as Error).message),
         );
       }
       break;
-    case 'modeToggle':
-      // Global button (nano CYCLE / GUI): toggle quantize on ALL channels. [SPEC-17.17]
-      rack.setAllQuantized(!rack.allQuantized);
+    }
+    // Pad sets: switching never starts or stops a loop. [SPEC-20.3/20.4]
+    case 'setPrev':
+      rack.stepSet(-1);
       break;
+    case 'setNext':
+      rack.stepSet(1);
+      break;
+    case 'setSelect':
+      rack.selectSet(intent.index);
+      break;
+    case 'ledModeToggle':
+      toggleLedMode();
+      break;
+    case 'modeToggle': {
+      // Global button (nano CYCLE / GUI): step ALL channels through the same
+      // cycle as one channel's button. Mixed channels are levelled first, so the
+      // press has a predictable outcome. [SPEC-17.17/17.60]
+      const common = rack.commonLaunch;
+      rack.setAllLaunch(common === null ? 'immediate' : stepChannelLaunch(common));
+      break;
+    }
     case 'channelModeToggle':
-      rack.toggleChannelQuantized(intent.channel);
+      rack.stepChannelLaunch(intent.channel);
       break;
     case 'windowPrev':
       launcher.windowPrev();
@@ -663,6 +991,9 @@ export function dispatch(intent: Intent): void {
     case 'transportStop':
       stopTransport(); // nano STOP = GUI STOP
       break;
+    case 'sessionRecordToggle':
+      toggleSessionRecording(); // nano REC [SPEC-17.59]
+      break;
   }
 }
 
@@ -673,6 +1004,31 @@ export function dispatch(intent: Intent): void {
 // Arming loops (toggling slots) never starts sound on its own.
 
 export const transportRunning = writable<boolean>(false);
+
+// --- Veille système [SPEC-17.58] ---
+//
+// Un set dure plus que le délai de veille : l'écran qui s'éteint en pleine
+// lecture emporte pads, chronomètre et position. Le verrou est donc demandé au
+// PLAY et rendu au STOP — jamais en permanence, la machine n'ayant aucune raison
+// de rester éveillée transport arrêté.
+
+/** Le verrou de veille est-il réellement tenu ? (indicateur GUI) */
+export const wakeLockHeld = writable<boolean>(false);
+/** L'API existe-t-elle dans ce navigateur ? */
+export const wakeLockSupported = isWakeLockSupported();
+
+// The transport lamps follow the mode. [SPEC-17.59]
+transportRunning.subscribe((running) => {
+  ledRunning = running;
+  syncLeds(lastChannels, lastSets);
+});
+
+setWakeLockReporter((level, message) => notify(level, message)); // jamais muet [SPEC-14.3]
+onWakeLockChange((held) => wakeLockHeld.set(held));
+transportRunning.subscribe((running) => {
+  if (running) void holdWakeLock();
+  else void releaseWakeLock();
+});
 
 // --- Audio unlock [SPEC-17.50] ---
 //
@@ -765,6 +1121,50 @@ export function stopAll(): void {
   clearEchoHolds();
   transportRunning.set(false);
   timerFreeze();
+}
+
+// --- Pad set editing [SPEC-20.7/20.8] ---
+//
+// Adding, removing, reordering, renaming and recoloring are reserved to a STOPPED
+// transport: mid-set, the only thing the surface should be able to do is switch.
+// A refusal is always SAID [SPEC-14.3] — a button that silently does nothing on
+// stage is worse than a disabled one.
+
+/** True while sets may be edited (transport stopped = out of live replay). */
+export const setsEditable = derived(transportRunning, (running) => !running);
+
+function editGuard(action: string): boolean {
+  if (!get(transportRunning)) return true;
+  notify('error', `Édition des sets verrouillée pendant la lecture — STOP pour ${action}.`);
+  return false;
+}
+
+export function addPadSet(): void {
+  if (!editGuard('ajouter un set')) return;
+  if (!rack.addSet()) {
+    notify('error', `Impossible d'ajouter un set : maximum de ${MAX_SETS} atteint.`);
+  }
+}
+
+export function removePadSet(index: number): void {
+  if (!editGuard('supprimer un set')) return;
+  const why = rack.removeSet(index);
+  if (why) notify('error', `Suppression impossible : ${why}.`);
+}
+
+export function movePadSet(index: number, delta: -1 | 1): void {
+  if (!editGuard('réordonner les sets')) return;
+  rack.moveSet(index, delta);
+}
+
+export function renamePadSet(index: number, name: string): void {
+  if (!editGuard('renommer un set')) return;
+  rack.renameSet(index, name);
+}
+
+export function recolorPadSet(index: number, color: SetColor): void {
+  if (!editGuard('changer la couleur d’un set')) return;
+  rack.recolorSet(index, color);
 }
 
 // --- Association editing (live) [SPEC-5.2/5.3, SPEC-10.6] ---
@@ -880,6 +1280,11 @@ export const channelCount = DEFAULT_CHANNEL_COUNT;
 
 export type SessionStatus = 'idle' | 'recording' | 'replaying';
 export const sessionStatus = writable<SessionStatus>('idle');
+// REC lamp mirror, same reason as ledRunning above. [SPEC-17.59]
+sessionStatus.subscribe((status) => {
+  ledRecording = status === 'recording';
+  syncLeds(lastChannels, lastSets);
+});
 export const lastSession = writable<Session | null>(null);
 
 interface Recording {
@@ -887,7 +1292,9 @@ interface Recording {
   bpm: number;
   mode: LaunchMode; // derived global view; per-channel state lives in `initial`
   window: LauncherState['window'];
-  initial: ChannelState[];
+  /** Every pad set at record start, and which one the pads addressed. [SPEC-20.12] */
+  initial: PadSet[];
+  activeSet: number;
   events: SessionEvent[];
 }
 
@@ -898,6 +1305,26 @@ let replayEvents: SessionEvent[] = [];
 let replayIndex = 0;
 let replayOrigin = 0;
 
+/**
+ * Start or stop the gesture journal (nano REC, or the GUI). Bound as well as lit
+ * [SPEC-17.59]: a lamp on a dead button is a trap on stage. A replay in progress
+ * refuses rather than recording its own re-emission.
+ */
+export function toggleSessionRecording(): void {
+  const status = get(sessionStatus);
+  if (status === 'replaying') {
+    notify('warn', 'Rejeu en cours — arrête-le avant d’enregistrer.');
+    return;
+  }
+  if (status === 'recording') {
+    const session = stopRecording();
+    notify('success', `Enregistrement arrêté — ${session?.events.length ?? 0} geste(s) captés.`);
+  } else {
+    startRecording();
+    notify('info', 'Enregistrement des gestes en cours.');
+  }
+}
+
 export function startRecording(): void {
   const { window } = launcher.state;
   recording = {
@@ -905,9 +1332,10 @@ export function startRecording(): void {
     bpm: clock.currentBpm,
     // Derived global view for display; the authoritative per-channel quantization
     // is captured in `initial` (the rack snapshot). [SPEC-17.17]
-    mode: rack.allQuantized ? 'quantized' : 'immediate',
+    mode: rack.commonLaunch === 'immediate' ? 'immediate' : 'quantized',
     window,
-    initial: rack.snapshot(),
+    initial: rack.setsSnapshot(),
+    activeSet: rack.activeSetIndex,
     events: [],
   };
   sessionStatus.set('recording');
@@ -920,7 +1348,8 @@ export function stopRecording(): Session | null {
     bpm: recording.bpm,
     mode: recording.mode,
     window: recording.window,
-    initialChannels: recording.initial,
+    initialSets: recording.initial,
+    activeSet: recording.activeSet,
     events: recording.events,
   };
   recording = null;
@@ -938,11 +1367,11 @@ export function stopRecording(): Session | null {
 export async function startReplay(session: Session | null = sessionData): Promise<void> {
   if (replaying || !session) return;
   // Restore initial state. [SPEC-11.2] Per-channel quantization is restored via
-  // rack.restore(initialChannels); session.mode is informational only. [SPEC-17.17]
+  // rack.restoreSets(initialSets); session.mode is informational only. [SPEC-17.17]
   setBpm(session.bpm);
   launcher.setWindow(session.window);
   await engine.init(); // Rejouer click is a gesture → unlock audio if needed
-  await rack.restore(session.initialChannels);
+  await rack.restoreSets(session.initialSets, session.activeSet);
   await engine.startTransport();
   transportRunning.set(true);
   audioEnabled.set(true);
